@@ -1,0 +1,18 @@
+[project]
+name = "receivables-agent"
+version = "0.1.0"
+description = "A conversational AI agent over accounts-receivable data: guarded text-to-SQL + RAG over a collections policy."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Jorge Ribeiro" }]
+
+# Runtime dependencies are added per phase — see PLAN.md.
+# Phase 1: faker, duckdb
+# Phase 2: langgraph, langchain-core, the provider SDKs
+# Phase 3: chromadb
+# Phase 4: fastapi, uvicorn, pydantic
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
