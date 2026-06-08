@@ -20,8 +20,13 @@ policy**.
 > [`PLAN.md`](PLAN.md) for the roadmap and [`docs/STATE.md`](docs/STATE.md) for
 > current progress.
 
-<!-- A demo GIF lands here once recorded on a live provider — see docs/DEMO.md.
-     (Omitted for now rather than linking a missing image.) -->
+![receivables-agent demo](docs/demo.gif)
+
+*One plain-language question → the agent runs **guarded SQL** over the ledger and
+**retrieves the governing policy**, then answers with the prioritized accounts
+*and* the cited rule. The `tools_used` badge shows which tools each answer hit.
+Recorded against a local Ollama model (`qwen2.5:7b`); a `GEMINI_API_KEY` works
+the same way.*
 
 ## What it does
 

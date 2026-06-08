@@ -20,6 +20,10 @@ chroma/
 web/node_modules/
 web/dist/
 
+# Local-only compose override (points the container at host Ollama; reference
+# only — the image is Gemini-only, so it isn't a supported path). See STATE.md.
+docker-compose.override.yml
+
 # OS / editor
 .DS_Store
 Thumbs.db

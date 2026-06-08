@@ -3,15 +3,32 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 implemented. The README is now safe to link (the broken demo-image
-line is removed; it carries a **real worked example** — figures queried from the
-ledger + the actual policy section), so the repo stands on its own as a portfolio
-link. **What's still preferred before sending to John:** the live-network run
-(one session on a normal network — see `docs/DEMO.md`): record `docs/demo.gif`,
-capture a latency number, and run `python -m evals.run` for the accuracy figure.
-Then the README's live numbers + GIF land and the "shipped link" is complete.
+Phases 0–5 implemented **and the ship gate is closed**: the live-network run is
+done and `docs/demo.gif` is recorded and embedded in the README, so the repo is a
+complete "shipped link". Still optional (nice-to-have, not blocking): add the two
+real README numbers from a live session — `python -m evals.run` pass-rate and one
+response latency (see `docs/DEMO.md` §6). The provider used for the demo was local
+Ollama `qwen2.5:7b`.
 
 ## Done
+- 2026-06-08: **Ship gate closed — live demo GIF.**
+  - First end-to-end live run, on the personal Linux notebook (normal network):
+    agent answered real questions using `query_ledger` (and `search_policy`),
+    HTTP 200. Provider: **local Ollama `qwen2.5:7b`** (tool-capable).
+  - Ran **outside Docker** (the repo's intended Ollama path): host `uvicorn`
+    reads `.env` (`PRIMARY_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434`),
+    `web/` built with `VITE_API_KEY` matching `APP_API_KEY`. The one-time ONNX
+    MiniLM embedding download succeeded (no MITM on this network).
+  - **Gotcha found & documented:** `docker-compose.yml` pins `PRIMARY_PROVIDER:
+    gemini` in its `environment:` block, which **overrides `.env`** — Compose only
+    uses the root `.env` for `${VAR}` *substitution*, it is not injected into the
+    container (no `env_file:`). So a `.env` set to Ollama is silently ignored by
+    the container, and the placeholder Gemini key then 500s. The Docker image is
+    also Gemini-only by design (`requirements.txt` omits `langchain-ollama`), so
+    Ollama-in-Docker is not a supported path — the host run is the clean one. Left
+    a git-ignored `docker-compose.override.yml` locally for reference only.
+  - `docs/demo.gif` (≈628 KB, inline-friendly) recorded and embedded in the README
+    (replaced the placeholder comment).
 - 2026-06-08: **Phase 5 — AI-native layer.**
   - `mcp_server/server.py`: MCP server exposing `query_ledger` (tool) +
     `schema://ledger` (resource) via FastMCP. Reuses the SAME guardrail as the
@@ -135,10 +152,10 @@ Then the README's live numbers + GIF land and the "shipped link" is complete.
   embedding by design. On the demo Space the one-time download is expected.
 - `data/chroma/` (the persisted index) is built on demand and git-ignored like
   the ledger; rebuild is automatic (idempotent) on first agent run.
-- Agent not yet exercised against a live LLM (tests are offline by design): no
-  Ollama daemon / Gemini key in this env. Build + tool + guard all verified;
-  first live run needs `ollama serve` + a tool-capable model (default
-  `llama3.1`) or a `GEMINI_API_KEY`.
+- Agent **exercised live on 2026-06-08** (host run, Ollama `qwen2.5:7b`): real
+  tool-using answers, HTTP 200. Tests stay offline by design. A live run needs
+  `ollama serve` + a tool-capable model (note: the default `llama3.1` works, and
+  `qwen2.5:7b` is confirmed) or a `GEMINI_API_KEY`.
 - Install providers per env: `pip install -e ".[ollama]"` and/or `".[gemini]"`
   (lazy imports — only the one you run is required).
 - Regenerate the ledger with `python data/generate.py` (needs `faker` extra:
