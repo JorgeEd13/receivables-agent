@@ -1,12 +1,23 @@
 # receivables-agent
 
-A conversational AI agent that answers questions about **accounts receivable** —
-overdue invoices, aging buckets, who to prioritize — by combining a **guarded
-text-to-SQL tool** over a ledger with **retrieval over a collections policy**.
+**Collections teams burn hours on two questions every day: _who do we chase
+first_, and _what does our policy allow?_** Answering them today means writing
+SQL against the ledger *and* digging through a policy document — for every
+account, every week.
 
-> **Status: MVP.** A public, clean-room portfolio project built on 100%
-> synthetic data. See [`PLAN.md`](PLAN.md) for the roadmap and
-> [`docs/STATE.md`](docs/STATE.md) for current progress.
+`receivables-agent` answers both in plain language. Ask *"which overdue accounts
+above $50k should go on credit hold this week, and what's the rule?"* and it
+returns the **prioritized accounts** (from the ledger) **with the governing
+policy, cited** — turning an analyst's afternoon of SQL and PDF-hunting into one
+question. Under the hood it's a ReAct agent that combines a **guarded
+text-to-SQL tool** over the ledger with **retrieval over the collections
+policy**.
+
+> **Status: working MVP.** The agent, the guarded SQL + RAG tools, the FastAPI
+> service, the React UI and the one-command Docker run are all implemented and
+> tested (Phases 0–4). A public, clean-room portfolio project on 100% synthetic
+> data. See [`PLAN.md`](PLAN.md) for the roadmap and [`docs/STATE.md`](docs/STATE.md)
+> for current progress.
 
 <!-- Record on a host with a Gemini key (or local Ollama): `docker compose up`,
      then screen-capture a couple of questions and save as docs/demo.gif. -->
@@ -23,7 +34,38 @@ week, and what does our policy say about offering a payment plan?"* The agent:
 3. Retrieves relevant rules from a **collections-policy knowledge base** (RAG).
 4. Answers in natural language, grounded in both sources.
 
-## Architecture (target)
+## The data (and why it's realistic)
+
+100% generated locally (Faker for the customer dimension + **set-based DuckDB**
+for the facts), so the project is clean-room and the figures are reproducible
+from a fixed seed:
+
+| Metric | Value |
+| --- | ---: |
+| Invoices | 1,057,402 |
+| Payments | 923,200 |
+| Dunning communications | 304,773 |
+| Customers | 13,000 |
+| Aging buckets | 5 — current / 1–30 / 31–60 / 61–90 / 90+ |
+| Reporting (as-of) date | 2026-06-30 |
+
+It carries **signal, not noise.** Every customer gets a payment-behaviour
+profile that drives a realistic overdue rate, so aging and DSO are meaningful and
+the agent can actually find the slow payers:
+
+| Behaviour profile | Overdue rate |
+| --- | ---: |
+| prompt | 0.5% |
+| reliable | 1.7% |
+| slow | 7.5% |
+| delinquent | 19.1% |
+| defaulter | 49.6% |
+
+On this ledger that totals **~$1.47B overdue out of ~$2.98B outstanding**, with a
+trailing-90-day **DSO ≈ 78 days** — the kind of numbers the agent computes on
+demand from natural-language questions.
+
+## Architecture
 
 ```
 (synthetic data) ──► DuckDB ledger
