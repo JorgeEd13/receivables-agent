@@ -8,11 +8,15 @@ license = { text = "MIT" }
 authors = [{ name = "Jorge Ribeiro" }]
 
 # Runtime dependencies are added per phase — see PLAN.md.
-# Phase 1: faker, duckdb
+# Phase 1: duckdb (engine), faker (dimensions)  ✅
 # Phase 2: langgraph, langchain-core, the provider SDKs
 # Phase 3: chromadb
 # Phase 4: fastapi, uvicorn, pydantic
-dependencies = []
+dependencies = [
+    "duckdb>=1.1",
+]
 
 [project.optional-dependencies]
+# Synthetic data generation (Phase 1). Only needed to (re)build the ledger.
+data = ["faker>=30"]
 dev = ["pytest"]
