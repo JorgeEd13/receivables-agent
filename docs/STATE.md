@@ -3,11 +3,34 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phase 4 (full-stack + ship) — done. **Remaining ship gate:** record `docs/demo.gif`
-on a host with a Gemini key (or local Ollama) and, optionally, deploy the demo
-to a Hugging Face Space. Then Phase 5 (MCP server + Claude Code skill + evals).
+Phases 0–5 implemented. **All that's left is the live-network run** (one session
+on a normal network — see `docs/DEMO.md`): record `docs/demo.gif`, capture a
+latency number, and run `python -m evals.run` for the accuracy figure. Then the
+README's three live numbers + GIF land and the "shipped link" is complete.
 
 ## Done
+- 2026-06-08: **Phase 5 — AI-native layer.**
+  - `mcp_server/server.py`: MCP server exposing `query_ledger` (tool) +
+    `schema://ledger` (resource) via FastMCP. Reuses the SAME guardrail as the
+    app through `run_guarded_query` (connect_readonly + guard_query). Named
+    `mcp_server` (not `mcp`) — a top-level `mcp/` shadowed the MCP SDK package
+    and broke its import; caught by the import test. `mcp_server/README.md` has
+    Claude Code registration. Smoke-verified: builds, registers tool + resource.
+  - `evals/`: `checks.py` (pure property checks — used_tool / mentions_all /
+    contains_number, tolerant + format-agnostic), `golden.py` (7 cases with
+    ledger-verified expectations spanning ledger-only / policy-only / both),
+    `run.py` (`python -m evals.run`, live harness, non-zero exit on failure).
+  - `.claude/skills/eval-agent/SKILL.md`: Claude Code skill that runs the evals.
+  - `tests/test_mcp.py` (guardrail parity: legal SELECT, row cap, write/unknown
+    rejected with nothing executed) + `tests/test_evals.py` (check primitives +
+    golden well-formedness). Full suite: **76 passing**.
+  - ADR-008 written (shared-guardrail MCP · `mcp_server` naming · property-based
+    evals). README "AI-native layer" section; ARCHITECTURE + CLAUDE.md + PLAN +
+    pyproject (`mcp` extra) updated.
+  - Offline by design: `evals/run.py` (live LLM) not run here — the accuracy
+    number is captured on the live-network machine, same trip as the GIF.
+
+### Earlier
 - 2026-06-08: **Phase 4 — full-stack + ship.**
   - `src/api/app.py`: FastAPI via `create_app(agent_builder)` factory. Async
     `lifespan` builds the agent **once** (read-only ledger + policy index) onto
@@ -96,9 +119,11 @@ to a Hugging Face Space. Then Phase 5 (MCP server + Claude Code skill + evals).
   preferred). That GIF + the repo is the "shipped link". Optionally deploy to a
   Hugging Face Space (Docker SDK; secrets `GEMINI_API_KEY`, `APP_API_KEY`,
   build-arg `VITE_API_KEY`; `PRIMARY_PROVIDER=gemini`).
-- Phase 5 — AI-native layer (lightweight): MCP server exposing the ledger query
-  as a tool; one Claude Code skill (e.g. an eval runner); a small golden-question
-  eval suite.
+- **Same live-network session, capture the README numbers:** run
+  `python -m evals.run` (with a provider) for the accuracy/pass-rate figure, and
+  note one response latency. Then add the GIF + a small "evals" and "latency"
+  line to the README — all real, none guessed.
+- After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
 - RAG default embeddings (ONNX MiniLM) **download the model once on first use**;

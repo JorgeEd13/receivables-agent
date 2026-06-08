@@ -48,10 +48,12 @@ Compose, one-command run. README with an architecture diagram and the
 methodology section. (Remaining ship gate: record the demo GIF + optional Space
 deploy — see `docs/STATE.md`.)
 
-### Phase 5 — AI-native layer (lightweight, in MVP)
-An MCP (Model Context Protocol) server exposing the ledger query as a tool; one
-Claude Code skill (e.g. an eval runner); fill `docs/DECISIONS.md`; a small eval
-suite (golden questions).
+### Phase 5 — AI-native layer (lightweight, in MVP)  ✅
+An MCP (Model Context Protocol) server exposing the ledger query as a tool (same
+guardrail as the app); a Claude Code skill that runs the evals; a small eval
+suite (golden questions with property checks, ledger-verified expectations).
+ADR-008. (The live accuracy *number* is captured on a machine with a provider —
+see `docs/DEMO.md` / `docs/STATE.md`.)
 
 ## MVP cut
 

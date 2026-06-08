@@ -139,6 +139,26 @@ that serves UI + API and generates the synthetic ledger at build time;
 `docker compose up` is the one-command run. The single same-origin container is
 also the shape a free cloud Space expects (`$PORT` override). See ADR-007.
 
+### AI-native layer (Phase 5 — implemented)
+
+The layer aimed at AI-native tooling/employers. See ADR-008.
+
+- **MCP server** (`mcp_server/`) — exposes the ledger to any MCP client (Claude
+  Code, Claude Desktop, other agents) as a `query_ledger` tool + a
+  `schema://ledger` resource. It calls `run_guarded_query`, which reuses the
+  **same** read-only connection + `guard_query` as the in-app tool, so the MCP
+  surface is no weaker than the app. Named `mcp_server` (not `mcp`) to avoid
+  shadowing the MCP SDK package. Run with `python -m mcp_server.server`.
+- **Eval suite** (`evals/`) — golden questions with **property checks** instead
+  of exact-string matching: `evals/checks.py` (pure: tool-usage, policy-keyword,
+  tolerant-number — unit-tested offline), `evals/golden.py` (cases with
+  ledger-verified expectations spanning ledger-only, policy-only, and both), and
+  `evals/run.py` (`python -m evals.run`, the live harness; non-zero exit on
+  failure so it can gate CI).
+- **Claude Code skill** (`.claude/skills/eval-agent/`) — runs the eval suite and
+  reports the pass rate. Together with `CLAUDE.md` (the AI-collaboration
+  conventions) this is the AI-native surface of the repo.
+
 ## Security model
 
 - **Two-layer SQL guardrail (ADR-003).** The tool runs on a **read-only** DuckDB

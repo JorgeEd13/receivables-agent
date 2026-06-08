@@ -50,11 +50,17 @@ then both together):
 Keep it ~15–25 s and **under ~8 MB** so GitHub renders it inline (drop the FPS or
 the width if it's too big).
 
-## 6. (Optional) capture real latency
+## 6. Capture the README numbers (same session)
 
-While you're here, note one question's response time (e.g. Gemini). A real
-number can go into the README as a small "typical latency" line — never a
-guessed one.
+You're on a live provider — grab the two real numbers the README still needs:
+
+- **Eval pass rate:** `pip install -e ".[gemini]"` (or `.[ollama]`) then
+  `python -m evals.run`. Note the final `N/M cases passed (X%)`.
+- **Latency:** note one question's response time.
+
+Both go into the README as real figures (an "Evaluation" line and a "typical
+latency" line) — never guessed. If an eval case fails, check whether it's a real
+regression or a stale expectation in `evals/golden.py` (ledger regenerated).
 
 ## 7. Save and publish
 

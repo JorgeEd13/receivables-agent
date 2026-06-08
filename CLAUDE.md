@@ -31,7 +31,9 @@ patterns from scratch and contains no proprietary code or data.
 - `src/api/`         — FastAPI app (lifespan, auth, routes)
 - `src/core/`        — config + Pydantic schemas
 - `web/`             — React chat UI
-- `mcp/`             — MCP server exposing the ledger as a tool
+- `mcp_server/`      — MCP server exposing the ledger as a tool (not `mcp/` — that
+                       would shadow the MCP SDK package; see ADR-008)
+- `evals/`           — golden-question eval suite (pure checks + live runner)
 - `.claude/skills/`  — Claude Code skill(s)
 - `tests/`           — pytest (the SQL guardrail is the priority suite)
 - `docs/`            — ARCHITECTURE, DECISIONS, STATE

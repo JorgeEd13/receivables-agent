@@ -131,8 +131,26 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG indexer, and the API stack
+pytest            # offline: SQL guardrail, RAG indexer, API, MCP, and evals (76 tests)
 ```
+
+## AI-native layer
+
+Beyond the app, the ledger and the agent are built to be *operated by other AI
+tools* — the surface AI-native teams care about:
+
+- **MCP server** ([`mcp_server/`](mcp_server/)) — exposes the ledger to any MCP
+  (Model Context Protocol) client (Claude Code, Claude Desktop, other agents) as
+  a `query_ledger` tool, running the **same read-only guardrail** as the app, so
+  a new surface is never a weaker one. `python -m mcp_server.server`.
+- **Eval suite** ([`evals/`](evals/)) — golden questions scored by *properties*
+  (used the right tool, cited the policy keyword, stated the right number within
+  tolerance) rather than brittle string matching; numeric expectations are
+  computed from the ledger. `python -m evals.run` gates a regression with a
+  non-zero exit. The pure checks are unit-tested offline.
+- **Claude Code skill** ([`.claude/skills/eval-agent/`](.claude/skills/eval-agent/))
+  + [`CLAUDE.md`](CLAUDE.md) — the conventions and the eval-runner skill that let
+  an AI collaborator work in this repo productively.
 
 ## How this was built
 

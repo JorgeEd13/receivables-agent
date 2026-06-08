@@ -5,6 +5,51 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-008 — AI-native layer: shared-guardrail MCP server + property-based evals
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+Phase 5 adds the layer aimed at AI-native employers: an MCP (Model Context
+Protocol) server, a Claude Code skill, and an eval suite. Three choices weren't
+obvious: how the MCP surface relates to the in-app tool, how to name the package,
+and how to judge a non-deterministic agent's answers.
+
+### Decision
+
+1. **The MCP server reuses the same guardrail — no second security model.**
+   `mcp_server/server.py` exposes `query_ledger` over MCP by calling
+   `run_guarded_query`, which uses the *same* `connect_readonly` +
+   `guard_query` (SELECT/WITH only, allow/deny lists, single statement, row cap)
+   as the in-app tool. A new surface must not be a weaker surface. The core is a
+   plain function so it's unit-tested offline (`tests/test_mcp.py`) without an
+   MCP client; the schema is exposed as a `schema://ledger` resource.
+2. **Package named `mcp_server`, not `mcp`.** A top-level `mcp/` package (which
+   `pythonpath=["."]` puts on `sys.path`) *shadows the MCP SDK's own `mcp`
+   package*, breaking `from mcp.server.fastmcp import FastMCP`. Renamed to
+   `mcp_server` to avoid the collision — caught immediately by the import test.
+3. **Evals assert properties, not exact strings.** An LLM phrases the same fact
+   many ways, so golden cases (`evals/golden.py`) check that the answer (a) used
+   the right tool(s), (b) cites the governing policy keywords, and (c) states the
+   right number within a tolerance — primitives in `evals/checks.py`. Numeric
+   expectations are computed from the ledger (reproducible via the fixed seed)
+   and policy keywords come from the policy doc, so a pass means *grounded in
+   both sources*. The checks are pure and offline-tested; only the runner
+   (`evals/run.py`, `python -m evals.run`) needs a live LLM.
+
+### Consequences
+
+- One guardrail, audited once, protects both the app and the MCP surface; a
+  guardrail regression fails tests for both.
+- The eval suite is a real regression gate (non-zero exit on failure) and the
+  source of a defensible accuracy number for the README — captured on a machine
+  with a live provider, never guessed.
+- The `mcp` extra is optional (`pip install -e ".[mcp]"`); the web/API container
+  doesn't carry it.
+
+---
+
 ## ADR-007 — Single same-origin container; agent built once; key baked into the UI
 
 **Status:** Accepted · 2026-06-08
