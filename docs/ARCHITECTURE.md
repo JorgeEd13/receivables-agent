@@ -62,10 +62,37 @@ base; its aging buckets and dunning cadence intentionally match this model.
 
 ## Components
 
-_(agent / api / web to be expanded per phase)_
+### Agent (Phase 2 — implemented)
+
+`src/agent/` is a LangGraph ReAct loop (`graph.build_agent`) over one tool so
+far, `query_ledger`.
+
+- **`sql_guard.py`** — the prompt-layer guardrail. `guard_query` strips comments
+  and splits statements (string-literal aware), requires `SELECT`/`WITH`, rejects
+  a deny-list of write/DDL/catalog/filesystem keywords, checks referenced
+  relations against an allow-list, and wraps the query in an outer `LIMIT`. Pure
+  and offline-testable (see ADR-003).
+- **`ledger.py`** — opens the ledger `read_only=True` (the authoritative half of
+  the guardrail) and runs guarded SQL.
+- **`tools.py`** — `query_ledger`: guard → read-only execute → JSON rows.
+  Guardrail rejections and SQL errors come back as text so the loop self-corrects.
+- **`providers.py` / `graph.py`** — dual provider (Ollama / Gemini) with active
+  fallback, wired through a dynamic-model callable so it survives
+  `create_react_agent`'s tool-binding (ADR-004). Order is config-driven
+  (`PRIMARY_PROVIDER`).
+- **`schema_hints.py`** — the schema description injected into the system prompt
+  and the tool description.
+
+Configuration lives in `src/core/config.py` (`pydantic-settings`, read from the
+environment / `.env`).
+
+_(api / web to be expanded per phase)_
 
 ## Security model
 
-- The SQL tool runs on a **read-only** DuckDB connection and is allow-listed;
-  even if prompt-level filtering failed, the connection cannot mutate data.
-- No secrets in code; configuration via environment variables.
+- **Two-layer SQL guardrail (ADR-003).** The tool runs on a **read-only** DuckDB
+  connection (the engine refuses every write/DDL) *and* a prompt-layer filter
+  (allow/deny lists, single-statement, row cap). Each layer covers the other's
+  weakness; neither is relaxed to make a query pass.
+- No secrets in code; configuration via environment variables. Provider SDKs are
+  imported lazily, so a key for a provider you don't run is never required.

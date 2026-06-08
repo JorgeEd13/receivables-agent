@@ -9,14 +9,26 @@ authors = [{ name = "Jorge Ribeiro" }]
 
 # Runtime dependencies are added per phase — see PLAN.md.
 # Phase 1: duckdb (engine), faker (dimensions)  ✅
-# Phase 2: langgraph, langchain-core, the provider SDKs
+# Phase 2: langgraph, langchain-core, pydantic-settings  ✅
 # Phase 3: chromadb
 # Phase 4: fastapi, uvicorn, pydantic
 dependencies = [
     "duckdb>=1.1",
+    "langgraph>=1.0",
+    "langchain-core>=0.3",
+    "pydantic>=2",
+    "pydantic-settings>=2",
 ]
 
 [project.optional-dependencies]
 # Synthetic data generation (Phase 1). Only needed to (re)build the ledger.
 data = ["faker>=30"]
+# LLM providers (Phase 2). Install the one(s) you run; the agent imports them
+# lazily, so Ollama-only or Gemini-only setups both work.
+gemini = ["langchain-google-genai>=2"]
+ollama = ["langchain-ollama>=0.2"]
 dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

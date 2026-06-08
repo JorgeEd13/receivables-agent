@@ -3,10 +3,109 @@
 Architecture Decision Records — one entry per non-obvious choice: context,
 decision, consequences. Kept short.
 
-> Pending (to be written as we reach each point):
->
-> - **ADR-002 — Project name avoids third-party trademarks.** Why
->   "receivables-copilot" was dropped in favor of "receivables-agent".
+---
+
+## ADR-004 — Dual-provider fallback via a dynamic-model callable
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+The agent must run on two interchangeable LLMs: a local one (Ollama) in dev and
+a cloud one (Gemini) on the demo Space, with **active fallback** if the primary
+fails at call time. LangChain expresses fallback as
+`primary.with_fallbacks([secondary])` — but LangGraph's `create_react_agent`
+auto-binds tools to a *single* `BaseChatModel` and rejects a `RunnableWithFallbacks`
+passed as `model` (it is neither a chat model nor a `RunnableBinding`).
+
+### Decision
+
+Bind the tools to **each** provider, combine them with `with_fallbacks`, and
+hand the result to `create_react_agent` as a **dynamic model callable** — a plain
+`(state, runtime) -> model` function. LangGraph treats a callable as a pre-built
+model and skips its own tool-binding, so the fallback runnable flows through
+every model turn. The primary/fallback order is config-driven; setting
+`PRIMARY_PROVIDER=gemini` inverts dev↔deploy with no code change. The fallback is
+wired only when it has credentials, so an Ollama-only box still builds.
+
+### Consequences
+
+- One agent definition serves both environments; the demo Space just flips an
+  env var. Provider SDKs are imported lazily, so neither is a hard dependency.
+- The callable signature is coupled to a LangGraph internal contract; pinned via
+  `langgraph>=1.0` and covered by a build smoke check.
+
+---
+
+## ADR-003 — Defense-in-depth guardrail for the text-to-SQL tool
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+The agent writes SQL from natural language and runs it against the ledger. That
+is the project's main attack surface: prompt injection could try to mutate data,
+read the filesystem (DuckDB's `read_csv`/`COPY`), or exfiltrate via stacked
+statements. A single prompt-level filter is not trustworthy on its own — LLM
+output is adversarial-by-default.
+
+### Decision
+
+Two independent layers, neither of which may be relaxed "to make a query pass":
+
+1. **Read-only connection** (authoritative). The ledger is opened
+   `duckdb.connect(path, read_only=True)`; the engine itself refuses every
+   write/DDL regardless of what the prompt produced.
+2. **Prompt-layer filter** (`sql_guard.guard_query`, fast feedback for the
+   ReAct loop): a string-literal-aware scanner that strips comments and splits
+   on top-level `;` (rejecting stacked statements), requires `SELECT`/`WITH`,
+   applies a deny-list of write/DDL/catalog/filesystem keywords, checks every
+   referenced relation against an **allow-list** (CTE names excepted), and wraps
+   the query in an outer `LIMIT` so the model can never dump the ledger. Keyword
+   and relation matching run on a copy with string contents masked, so data like
+   a customer named `'DROP TABLE x'` is not mistaken for an attack.
+
+Rejections and SQL errors are returned to the model as text (not raised) so the
+loop can read the reason and self-correct.
+
+### Why not just one layer
+
+- Prompt-only is bypassable (novel encodings, parser gaps). The read-only
+  connection is the hard stop.
+- Connection-only gives the model opaque engine errors and still lets it read
+  *any* table; the allow-list + row cap scope it to the intended relations and
+  keep tool output small. Each layer covers the other's weakness.
+
+### Consequences
+
+- **Positive:** mutations are impossible by construction; the filter is unit-
+  testable offline (the priority `tests/test_sql_guard.py` suite — injection and
+  over-blocking cases) with no LLM or DB.
+- **Limits:** the relation extractor is a regex/token scanner, not a full SQL
+  parser; it is best-effort at the prompt layer and leans on the read-only
+  connection as the backstop for anything it doesn't model.
+
+---
+
+## ADR-002 — Project name avoids third-party trademarks
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+The project was first sketched as "receivables-copilot". "Copilot" is a Microsoft
+product brand; using it in a public portfolio repo invites trademark confusion
+and dates the project to a single vendor's framing.
+
+### Decision
+
+Name it **receivables-agent**. It is accurate ("agent" describes the ReAct
+architecture), vendor-neutral, and carries no third-party mark.
+
+### Consequences
+
+- No brand collision; the name describes the architecture, not a product.
+- One-time rename of the repo/package early, before any external links exist.
 
 ---
 
