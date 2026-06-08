@@ -16,23 +16,34 @@ from langgraph.prebuilt import create_react_agent
 
 from src.agent.providers import build_chat_model, has_credentials
 from src.agent.schema_hints import SCHEMA_HINTS
-from src.agent.tools import make_query_ledger_tool
+from src.agent.tools import make_query_ledger_tool, make_search_policy_tool
 from src.core.config import Settings, get_settings
 from src.agent.ledger import connect_readonly
+from src.rag.index import ensure_policy_index
 
 SYSTEM_PROMPT = f"""\
 You are a careful accounts-receivable analyst. Answer questions about overdue
-invoices, aging, DSO and which customers to prioritize for collections.
+invoices, aging, DSO, collections policy and which customers to prioritize.
+
+You have two tools, and the best answers use them together:
+- `query_ledger` — guarded read-only DuckDB SELECT for any number, name or fact
+  (who owes what, aging, DSO). Never guess data or use prior knowledge of it.
+- `search_policy` — retrieves the company's written collections policy (rules,
+  thresholds, cadence, processes) with the section heading to cite.
 
 Rules:
-- For any number, name, or fact, query the ledger with the `query_ledger` tool —
-  never guess or use prior knowledge of the data.
+- Use BOTH tools when a question mixes facts and rules: get the number from
+  `query_ledger` AND the governing rule from `search_policy`, then combine them.
+  For example "which overdue accounts should go on credit hold?" — look up the
+  credit-hold rule with `search_policy`, then find the matching accounts with
+  `query_ledger`. Don't state a policy threshold from memory; retrieve it.
 - Write standard DuckDB SQL. Prefer the analytics views. Aggregate in SQL rather
   than pulling raw rows; the tool caps the number of rows returned.
 - If a query is rejected or errors, read the reason and fix the SQL — do not try
   to bypass the guardrail.
-- Ground every claim in tool results and answer concisely. State your
-  assumptions when a question is ambiguous (e.g. what "overdue" threshold).
+- Ground every claim in tool results, cite the policy section when you rely on
+  it, and answer concisely. State your assumptions when a question is ambiguous
+  (e.g. what "overdue" threshold).
 
 {SCHEMA_HINTS}"""
 
@@ -69,7 +80,11 @@ def build_agent(
     """
     settings = settings or get_settings()
     con = con or connect_readonly(settings.ledger_path)
+    policy = ensure_policy_index(settings)
 
-    tools = [make_query_ledger_tool(con, settings.max_rows)]
+    tools = [
+        make_query_ledger_tool(con, settings.max_rows),
+        make_search_policy_tool(policy, settings.search_k),
+    ]
     model = build_dynamic_model(settings, tools)
     return create_react_agent(model, tools=tools, prompt=SYSTEM_PROMPT)

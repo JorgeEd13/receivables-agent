@@ -1,9 +1,10 @@
-"""The agent's tools. Phase 2 ships the guarded text-to-SQL tool.
+"""The agent's tools.
 
-``query_ledger`` is the only way the agent touches data. It runs every query
-through ``sql_guard.guard_query`` (allow/deny + row cap) and then a read-only
-connection (``ledger``). Guardrail rejections and SQL errors are returned to the
-model as text, not raised, so a ReAct loop can read the reason and try again.
+Two grounded tools, used together: ``query_ledger`` answers the *numbers* with
+guarded text-to-SQL, and ``search_policy`` answers the *rules* by retrieving
+from the collections policy (RAG). Both return JSON as text; ``query_ledger``
+returns guardrail rejections and SQL errors as text too (not raised), so a
+ReAct loop can read the reason and try again.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 import duckdb
+from chromadb.api.models.Collection import Collection
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -80,4 +82,49 @@ def make_query_ledger_tool(
         name="query_ledger",
         description=_TOOL_DESCRIPTION,
         args_schema=QueryLedgerInput,
+    )
+
+
+_SEARCH_DESCRIPTION = (
+    "Search the company collections policy and return the most relevant rules as "
+    "JSON, each with its section heading so you can cite it. Use this for any "
+    'question about *policy* — what the rule, threshold, cadence or process is '
+    "(e.g. dunning timing, credit holds, payment plans, write-off thresholds, "
+    "prioritisation). It does not see the ledger data; pair it with `query_ledger` "
+    "when an answer needs both a number and the rule that governs it."
+)
+
+
+class SearchPolicyInput(BaseModel):
+    query: str = Field(
+        description="A natural-language question about the collections policy."
+    )
+
+
+def make_search_policy_tool(collection: Collection, k: int) -> StructuredTool:
+    """Build the `search_policy` tool bound to a policy collection and a top-k."""
+
+    def search_policy(query: str) -> str:
+        result = collection.query(query_texts=[query], n_results=k)
+        ids = result["ids"][0]
+        documents = result["documents"][0]
+        metadatas = result["metadatas"][0]
+        distances = (result.get("distances") or [[None] * len(ids)])[0]
+
+        results = [
+            {
+                "heading": (meta or {}).get("heading"),
+                "source": (meta or {}).get("source"),
+                "text": document,
+                "distance": distance,
+            }
+            for document, meta, distance in zip(documents, metadatas, distances)
+        ]
+        return json.dumps({"query": query, "result_count": len(results), "results": results})
+
+    return StructuredTool.from_function(
+        func=search_policy,
+        name="search_policy",
+        description=_SEARCH_DESCRIPTION,
+        args_schema=SearchPolicyInput,
     )

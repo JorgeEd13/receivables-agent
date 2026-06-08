@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # Hard cap on rows returned by the SQL tool (the guard enforces it).
     max_rows: int = Field(default=200, ge=1, le=10_000)
 
+    # --- RAG over the collections policy ---
+    policy_path: str = "data/collections_policy.md"
+    chroma_path: str = "data/chroma"
+    policy_collection: str = "collections_policy"
+    # How many policy chunks `search_policy` returns.
+    search_k: int = Field(default=4, ge=1, le=20)
+
     # --- API auth (used from Phase 4) ---
     app_api_key: str = "change-me"
 

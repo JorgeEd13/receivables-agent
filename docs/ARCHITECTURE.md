@@ -62,10 +62,26 @@ base; its aging buckets and dunning cadence intentionally match this model.
 
 ## Components
 
-### Agent (Phase 2 — implemented)
+### RAG over the policy (Phase 3 — implemented)
 
-`src/agent/` is a LangGraph ReAct loop (`graph.build_agent`) over one tool so
-far, `query_ledger`.
+`src/rag/` indexes `data/collections_policy.md` into ChromaDB and serves
+retrieval to the `search_policy` tool.
+
+- **`chunking.py`** — splits the policy on its `##` sections (each a
+  self-contained, citable rule) into chunks with deterministic IDs
+  (`"{source}::{heading-slug}"`).
+- **`embeddings.py`** — local embeddings by default (ChromaDB's bundled ONNX
+  `all-MiniLM-L6-v2`; no key, no provider coupling — ADR-005) and an injectable
+  `DeterministicEmbeddingFunction` (offline hashing vectorizer) for tests.
+- **`index.py`** — `build_index` is idempotent: `upsert` by deterministic ID +
+  prune orphaned IDs, so the collection always mirrors the document (ADR-006).
+  `ensure_policy_index` builds it once on the agent's first run and reuses it
+  after.
+
+### Agent (Phase 2–3 — implemented)
+
+`src/agent/` is a LangGraph ReAct loop (`graph.build_agent`) over two tools,
+used together: `query_ledger` (numbers) and `search_policy` (rules).
 
 - **`sql_guard.py`** — the prompt-layer guardrail. `guard_query` strips comments
   and splits statements (string-literal aware), requires `SELECT`/`WITH`, rejects
@@ -74,8 +90,12 @@ far, `query_ledger`.
   and offline-testable (see ADR-003).
 - **`ledger.py`** — opens the ledger `read_only=True` (the authoritative half of
   the guardrail) and runs guarded SQL.
-- **`tools.py`** — `query_ledger`: guard → read-only execute → JSON rows.
-  Guardrail rejections and SQL errors come back as text so the loop self-corrects.
+- **`tools.py`** — `query_ledger`: guard → read-only execute → JSON rows
+  (rejections/errors come back as text so the loop self-corrects); and
+  `search_policy`: retrieve top-k policy chunks → JSON with the section heading
+  to cite. The system prompt steers the agent to use both together (e.g. fetch
+  the credit-hold *rule* with `search_policy`, then the matching *accounts* with
+  `query_ledger`).
 - **`providers.py` / `graph.py`** — dual provider (Ollama / Gemini) with active
   fallback, wired through a dynamic-model callable so it survives
   `create_react_agent`'s tool-binding (ADR-004). Order is config-driven

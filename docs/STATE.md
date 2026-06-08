@@ -3,10 +3,30 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phase 2 (guarded text-to-SQL + agent core) — done. Next up: Phase 3 (RAG over
-the collections policy).
+Phase 3 (RAG over the collections policy) — done. Next up: Phase 4 (FastAPI +
+React + Docker, one-command run, README GIF).
 
 ## Done
+- 2026-06-08: **Phase 3 — RAG over the collections policy.**
+  - `src/rag/chunking.py`: split the policy on `##` sections (one citable rule
+    each) into chunks with deterministic IDs (`"{source}::{heading-slug}"`).
+  - `src/rag/embeddings.py`: local default (ChromaDB ONNX `all-MiniLM-L6-v2`,
+    no key — ADR-005) + injectable `DeterministicEmbeddingFunction` (offline
+    hashing vectorizer) for tests.
+  - `src/rag/index.py`: idempotent `build_index` (upsert by ID + prune orphans →
+    collection mirrors the doc; ADR-006); `ensure_policy_index` builds once,
+    reuses after.
+  - `src/agent/tools.py`: `search_policy` tool — top-k chunks as JSON with the
+    section heading to cite.
+  - `src/agent/graph.py`: registered `search_policy` alongside `query_ledger`;
+    rewrote the system prompt to use BOTH tools together (number from the ledger
+    + governing rule from the policy, cited).
+  - `tests/test_rag.py`: 5 offline tests — idempotency (same input → same
+    IDs/count), pruning of removed sections, and retrieval finds the expected
+    rule (deterministic embeddings, ephemeral client). Full suite: **58 passing**.
+  - ADR-005 (local embeddings) + ADR-006 (idempotent indexer) written.
+
+### Earlier
 - 2026-06-08: **Phase 2 — guarded text-to-SQL + agent core.**
   - `src/agent/sql_guard.py`: defense-in-depth guardrail. String-literal-aware
     scanner (strip comments, split top-level `;`), `SELECT`/`WITH` only,
@@ -42,11 +62,17 @@ the collections policy).
     data-model section updated.
 
 ## Next
-- Phase 3 — RAG over the collections policy: idempotent ChromaDB indexer
-  (deterministic IDs over `data/collections_policy.md`); `search_policy` tool;
-  register it alongside `query_ledger` so the agent uses both tools together.
+- Phase 4 — full-stack + ship: FastAPI (async lifespan, API-key auth, Pydantic
+  v2) wrapping `build_agent`; React chat UI; Docker + Compose one-command run;
+  README with a demo GIF + architecture diagram.
 
 ## Open decisions / notes
+- RAG default embeddings (ONNX MiniLM) **download the model once on first use**;
+  this sandbox blocks the fetch (SSL cert), so the live ONNX path is verified by
+  code but not exercised here. Tests run offline on the deterministic hashing
+  embedding by design. On the demo Space the one-time download is expected.
+- `data/chroma/` (the persisted index) is built on demand and git-ignored like
+  the ledger; rebuild is automatic (idempotent) on first agent run.
 - Agent not yet exercised against a live LLM (tests are offline by design): no
   Ollama daemon / Gemini key in this env. Build + tool + guard all verified;
   first live run needs `ollama serve` + a tool-capable model (default

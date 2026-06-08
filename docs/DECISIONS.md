@@ -5,6 +5,84 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-006 — Idempotent policy indexer (deterministic IDs + prune)
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+The policy index is rebuilt on demand — on the agent's first run, in tests, and
+whenever the policy doc changes. A naive "embed all chunks and `add`" duplicates
+every chunk on each run (ChromaDB's `add` appends), so retrieval would return
+stale copies and counts would drift. The index must instead converge to exactly
+mirror the current document, however many times it runs.
+
+### Decision
+
+Make `build_index` idempotent on two mechanisms:
+
+1. **Deterministic chunk IDs.** Chunk on the policy's `##` sections (each is a
+   self-contained, citable rule by design) and ID each as
+   `"{source}::{heading-slug}"`. `upsert` by that ID overwrites a section in
+   place — same input → same IDs → no duplicates, and an *edited* section
+   updates rather than appends.
+2. **Prune orphans.** After upserting the current chunks, delete any ID in the
+   collection that the current document no longer produces, so a removed or
+   renamed section can't leave a stale chunk behind.
+
+The net guarantee: after any run, the collection equals the document — same IDs
+and count regardless of history. This is the property the offline tests assert
+(`tests/test_rag.py`: re-index → identical IDs/count; drop a section → it's
+pruned).
+
+### Consequences
+
+- Safe to call on every agent build (`ensure_policy_index` reuses a populated
+  collection; first run builds it once).
+- IDs are heading-derived, so two sections must not share a heading; the policy
+  doc uses unique `##` headings, and a collision would surface as a lost chunk
+  in the count assertions.
+
+---
+
+## ADR-005 — Local embeddings for RAG, with an injectable function
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+`search_policy` needs to embed the policy chunks and the query. Two routes: a
+**provider embedding API** (e.g. Gemini embeddings) or a **local model**. The
+project ships as a self-contained "shipped link" that runs on a free cloud
+Space and must keep unit tests offline — and the LLM provider is already
+swappable (Ollama/Gemini, ADR-004), so coupling retrieval to one provider's
+embedding API would re-introduce a key/quota/network dependency the rest of the
+design avoids.
+
+### Decision
+
+Use **local embeddings** by default: ChromaDB's bundled ONNX `all-MiniLM-L6-v2`
+(`DefaultEmbeddingFunction`) — no API key, no per-call cost, runs in-process via
+`onnxruntime`. The model file downloads once on first use and is cached.
+
+Make the embedding function **injectable** (`build_index`/`get_collection` take
+it as a parameter). That keeps retrieval decoupled from the LLM provider and
+lets the tests pass a `DeterministicEmbeddingFunction` — a dependency-free
+hashing bag-of-words vectorizer that needs no download, so the suite indexes and
+retrieves fully offline and reproducibly.
+
+### Consequences
+
+- The demo Space embeds locally; no embedding key or quota, and retrieval is
+  independent of which LLM provider is active.
+- One-time MiniLM download on first run (cached after). In a network-restricted
+  environment the injectable hashing function is a no-download fallback.
+- The deterministic function is lexical, not semantic — fine for the tests'
+  shared-vocabulary assertions, but it is a test/fallback aid, not the shipping
+  retriever.
+
+---
+
 ## ADR-004 — Dual-provider fallback via a dynamic-model callable
 
 **Status:** Accepted · 2026-06-08
