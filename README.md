@@ -4,9 +4,13 @@ A conversational AI agent that answers questions about **accounts receivable** �
 overdue invoices, aging buckets, who to prioritize — by combining a **guarded
 text-to-SQL tool** over a ledger with **retrieval over a collections policy**.
 
-> **Status: work in progress.** This is a public, clean-room portfolio project
-> built on 100% synthetic data. See [`PLAN.md`](PLAN.md) for the roadmap and
+> **Status: MVP.** A public, clean-room portfolio project built on 100%
+> synthetic data. See [`PLAN.md`](PLAN.md) for the roadmap and
 > [`docs/STATE.md`](docs/STATE.md) for current progress.
+
+<!-- Record on a host with a Gemini key (or local Ollama): `docker compose up`,
+     then screen-capture a couple of questions and save as docs/demo.gif. -->
+![Demo](docs/demo.gif)
 
 ## What it does
 
@@ -48,8 +52,45 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for detail.
 
 ## Run
 
-> Coming together phase by phase — see [`PLAN.md`](PLAN.md). The target is a
-> single `docker compose up`.
+### One command (Docker)
+
+```bash
+cp .env.example .env          # then set GEMINI_API_KEY (and APP_API_KEY) in .env
+docker compose up --build
+```
+
+Open <http://localhost:8000>. The image builds the React UI, installs the API,
+**generates the synthetic ledger at build time**, and serves the UI + API from a
+single container. The demo uses the cloud provider (Gemini); set `GEMINI_API_KEY`
+in `.env`. `APP_API_KEY` guards the API and is baked into the UI build so the
+same-origin browser can authenticate (keep the two equal).
+
+### Local dev (two processes)
+
+```bash
+# 1) API — Ollama primary by default (run `ollama serve` + pull a tool model),
+#    or set PRIMARY_PROVIDER=gemini + GEMINI_API_KEY in .env.
+pip install -e ".[ollama,gemini,data,dev]"
+python data/generate.py                       # build data/ledger.duckdb once
+uvicorn src.api.app:app --reload              # http://localhost:8000
+
+# 2) Web — Vite dev server, proxies /api to the API above.
+cd web && npm install && npm run dev          # http://localhost:5173
+```
+
+### API
+
+- `GET /api/health` — liveness + whether the agent is built (open, no key).
+- `POST /api/chat` — `{ "message": "...", "history": [...] }` with an
+  `X-API-Key` header → `{ "reply": "...", "tools_used": ["query_ledger", ...] }`.
+  Interactive docs at `/docs`.
+
+### Tests
+
+```bash
+pip install -e ".[dev]"
+pytest            # offline: SQL guardrail, RAG indexer, and the API stack
+```
 
 ## How this was built
 

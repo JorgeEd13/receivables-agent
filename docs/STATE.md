@@ -3,10 +3,36 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phase 3 (RAG over the collections policy) — done. Next up: Phase 4 (FastAPI +
-React + Docker, one-command run, README GIF).
+Phase 4 (full-stack + ship) — done. **Remaining ship gate:** record `docs/demo.gif`
+on a host with a Gemini key (or local Ollama) and, optionally, deploy the demo
+to a Hugging Face Space. Then Phase 5 (MCP server + Claude Code skill + evals).
 
 ## Done
+- 2026-06-08: **Phase 4 — full-stack + ship.**
+  - `src/api/app.py`: FastAPI via `create_app(agent_builder)` factory. Async
+    `lifespan` builds the agent **once** (read-only ledger + policy index) onto
+    `app.state`; `GET /api/health` (open) + `POST /api/chat` (API-key via
+    `X-API-Key`, constant-time compare). Mounts a built `web/dist` at `/` so one
+    container serves UI + API same-origin. Builder is injectable → offline tests.
+  - `src/api/schemas.py`: Pydantic v2 boundary (`ChatRequest` message+history,
+    `ChatResponse` reply+`tools_used`, role-restricted `Message`).
+  - `web/`: minimal React (Vite) chat UI — history in state, posts to `/api/chat`,
+    renders replies + a `tools_used` badge; Vite proxies `/api` in dev. `npm run
+    build` verified (32 modules, ~145 kB). API key baked via `VITE_API_KEY`.
+  - `Dockerfile` (multi-stage Node→Python) + `docker-compose.yml` + `.dockerignore`
+    + `requirements.txt`: one-command `docker compose up`; ledger generated at
+    image build; `$PORT` override for a Space.
+  - `tests/test_api.py`: 7 offline tests (health open, auth required/wrong-key,
+    happy path reply+tools, history forwarding, empty-message + bad-role 422),
+    injected stub agent. Full suite: **65 passing**.
+  - ADR-007 written (single same-origin container · build agent once · baked UI
+    key · build-time ledger). README Run section + ARCHITECTURE api/web/deploy
+    sections + `.env.example` note updated. pyproject deps: fastapi, uvicorn, httpx.
+  - Verified here: static mount serves the SPA at `/` and `/api/health` → ok
+    against a stub agent (LLM/ONNX/`docker build`/`npm install` registry are
+    blocked by the sandbox SSL cert — code paths verified, not exercised live).
+
+### Earlier
 - 2026-06-08: **Phase 3 — RAG over the collections policy.**
   - `src/rag/chunking.py`: split the policy on `##` sections (one citable rule
     each) into chunks with deterministic IDs (`"{source}::{heading-slug}"`).
@@ -62,9 +88,14 @@ React + Docker, one-command run, README GIF).
     data-model section updated.
 
 ## Next
-- Phase 4 — full-stack + ship: FastAPI (async lifespan, API-key auth, Pydantic
-  v2) wrapping `build_agent`; React chat UI; Docker + Compose one-command run;
-  README with a demo GIF + architecture diagram.
+- **Ship gate (do first):** record `docs/demo.gif` (run `docker compose up` with
+  a `GEMINI_API_KEY`, or local Ollama, and capture 2–3 questions). That + the
+  repo is the "shipped link". Optionally deploy to a Hugging Face Space (Docker
+  SDK; secrets `GEMINI_API_KEY`, `APP_API_KEY`, build-arg `VITE_API_KEY`; set
+  `PRIMARY_PROVIDER=gemini`).
+- Phase 5 — AI-native layer (lightweight): MCP server exposing the ledger query
+  as a tool; one Claude Code skill (e.g. an eval runner); a small golden-question
+  eval suite.
 
 ## Open decisions / notes
 - RAG default embeddings (ONNX MiniLM) **download the model once on first use**;

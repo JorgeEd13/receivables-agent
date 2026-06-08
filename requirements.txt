@@ -1,0 +1,16 @@
+# Pinned-floor runtime dependencies for the Docker image (mirrors pyproject's
+# runtime deps + the cloud provider used by the demo + the data generator that
+# builds the synthetic ledger at image-build time). Local dev should instead use
+#   pip install -e ".[ollama,gemini,data,dev]"
+duckdb>=1.1
+langgraph>=1.0
+langchain-core>=0.3
+pydantic>=2
+pydantic-settings>=2
+chromadb>=1.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+# Cloud LLM provider for the public demo (Ollama stays a local-dev option).
+langchain-google-genai>=2
+# Builds the synthetic ledger during the image build.
+faker>=30

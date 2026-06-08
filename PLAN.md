@@ -42,10 +42,11 @@ suite.
 Idempotent ChromaDB indexer (deterministic IDs); `search_policy` tool; agent
 uses both tools together.
 
-### Phase 4 — Full-stack + ship
+### Phase 4 — Full-stack + ship  ✅
 FastAPI (async lifespan, API-key auth, Pydantic v2); React chat UI; Docker +
-Compose, one-command run. README with a demo GIF, an architecture diagram, and
-the methodology section.
+Compose, one-command run. README with an architecture diagram and the
+methodology section. (Remaining ship gate: record the demo GIF + optional Space
+deploy — see `docs/STATE.md`.)
 
 ### Phase 5 — AI-native layer (lightweight, in MVP)
 An MCP (Model Context Protocol) server exposing the ledger query as a tool; one

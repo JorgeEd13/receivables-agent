@@ -5,6 +5,54 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-007 — Single same-origin container; agent built once; key baked into the UI
+
+**Status:** Accepted · 2026-06-08
+
+### Context
+
+Phase 4 turns the agent into a runnable "shipped link": a FastAPI service, a
+React UI, and a one-command run that also has to work on a free cloud Space.
+Three choices weren't obvious: (a) how to host the UI and API, (b) when to build
+the agent, and (c) how the browser authenticates to a key-protected API on a
+public demo.
+
+### Decision
+
+1. **One same-origin container.** A multi-stage `Dockerfile` builds the React
+   bundle (Node stage) and serves it as static files from the same FastAPI app
+   that exposes `/api` (Python stage). No separate web server, no CORS, no
+   second service to orchestrate — and it matches what a free Space runs (one
+   container, `$PORT`). In dev the two run apart (Vite proxies `/api`), so the
+   UI is same-origin in both modes.
+2. **Build the agent once, in an async `lifespan`.** Constructing the agent
+   opens the read-only ledger and builds the policy index — startup work, not
+   per-request. It lives on `app.state`; requests reuse it. `create_app` takes
+   an injectable `agent_builder` so the HTTP stack is testable offline against a
+   stub (no LLM), which is how `tests/test_api.py` runs.
+3. **API-key auth, baked into the UI build.** `/api/chat` requires an
+   `X-API-Key` matching `Settings.app_api_key` (constant-time compare);
+   `/api/health` stays open for probes. The same key is baked into the bundle at
+   build time (`VITE_API_KEY`) so the same-origin browser can call the API. It
+   demonstrates the auth boundary without a login system; the key isn't a
+   user-secret here (the data is synthetic), it gates the public demo endpoint.
+4. **Generate the ledger at image-build time.** The synthetic ledger is
+   deterministic and ~45 s to build, so `RUN python data/generate.py` bakes it
+   into the image (the `.dockerignore` excludes any local `*.duckdb`) — the
+   container is self-contained and needs no data volume.
+
+### Consequences
+
+- One artifact to ship and one command to run; the same image runs locally and
+  on a Space by flipping `PRIMARY_PROVIDER=gemini` and setting secrets.
+- The baked UI key is visible to anyone who inspects the bundle — acceptable for
+  a synthetic-data demo, and rotating it is a rebuild. A real multi-tenant app
+  would use per-user auth instead; out of scope here.
+- The policy index's one-time ONNX embedding download still happens at first
+  run (ADR-005), not build time — the first request after a cold start pays it.
+
+---
+
 ## ADR-006 — Idempotent policy indexer (deterministic IDs + prune)
 
 **Status:** Accepted · 2026-06-08

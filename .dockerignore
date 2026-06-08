@@ -1,0 +1,32 @@
+# Keep the build context small and the image reproducible.
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Regenerated inside the image — never ship the local copies.
+data/*.duckdb
+data/*.parquet
+data/chroma/
+.chroma/
+chroma/
+
+# Web build artifacts (rebuilt in the node stage).
+web/node_modules/
+web/dist/
+
+# Local secrets / editor / OS noise.
+.env
+*.key
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Docs aren't needed at runtime (README is copied explicitly if wanted).
+docs/
+tests/

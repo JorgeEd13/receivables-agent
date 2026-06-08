@@ -1,0 +1,23 @@
+# One-command run:  docker compose up --build
+#
+# Put GEMINI_API_KEY (and optionally APP_API_KEY) in a local .env first — Compose
+# substitutes ${VARS} below from it. The demo uses the cloud provider (Gemini),
+# so no local Ollama is needed inside the container.
+services:
+  app:
+    build:
+      context: .
+      args:
+        # The UI bakes this key; it must match APP_API_KEY so the browser can
+        # authenticate to the API.
+        VITE_API_KEY: ${APP_API_KEY:-change-me}
+    ports:
+      - "8000:8000"
+    environment:
+      # Cloud provider primary (no Ollama in the container). Fallback defaults to
+      # gemini too, so it collapses to a single provider — no code change.
+      PRIMARY_PROVIDER: gemini
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      APP_API_KEY: ${APP_API_KEY:-change-me}
+    restart: unless-stopped

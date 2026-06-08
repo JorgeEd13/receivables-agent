@@ -11,7 +11,7 @@ authors = [{ name = "Jorge Ribeiro" }]
 # Phase 1: duckdb (engine), faker (dimensions)  ✅
 # Phase 2: langgraph, langchain-core, pydantic-settings  ✅
 # Phase 3: chromadb (RAG over the policy; bundled local ONNX embeddings)  ✅
-# Phase 4: fastapi, uvicorn, pydantic
+# Phase 4: fastapi, uvicorn (HTTP service wrapping the agent)  ✅
 dependencies = [
     "duckdb>=1.1",
     "langgraph>=1.0",
@@ -19,6 +19,8 @@ dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",
     "chromadb>=1.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +30,8 @@ data = ["faker>=30"]
 # lazily, so Ollama-only or Gemini-only setups both work.
 gemini = ["langchain-google-genai>=2"]
 ollama = ["langchain-ollama>=0.2"]
-dev = ["pytest"]
+# Test/dev tooling. httpx powers FastAPI's TestClient (API tests run offline).
+dev = ["pytest", "httpx>=0.27"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

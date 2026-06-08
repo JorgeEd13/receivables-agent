@@ -106,7 +106,38 @@ used together: `query_ledger` (numbers) and `search_policy` (rules).
 Configuration lives in `src/core/config.py` (`pydantic-settings`, read from the
 environment / `.env`).
 
-_(api / web to be expanded per phase)_
+### API (Phase 4 — implemented)
+
+`src/api/` is a FastAPI service wrapping `build_agent`.
+
+- **`app.py`** — `create_app(agent_builder)` factory. An async `lifespan`
+  builds the agent **once** at startup (opening the read-only ledger and the
+  policy index) and stores it on `app.state`; every request reuses it. The
+  builder is injectable so tests run the whole HTTP stack against an offline
+  stub (no LLM). Endpoints: `GET /api/health` (open) and `POST /api/chat`
+  (API-key protected). When a built `web/dist` exists it is mounted at `/`, so
+  one container serves UI + API same-origin.
+- **`schemas.py`** — Pydantic v2 models at the boundary (`ChatRequest` with
+  `message` + prior `history`; `ChatResponse` with `reply` + `tools_used`).
+- **Auth** — an `X-API-Key` header is compared to `Settings.app_api_key` with a
+  constant-time compare (`secrets.compare_digest`); `/api/health` is open for
+  orchestrator probes (ADR-007).
+
+### Web (Phase 4 — implemented)
+
+`web/` is a minimal React (Vite) chat UI: keeps the conversation in state, posts
+each turn (+ history) to `/api/chat`, renders replies and a small `tools_used`
+badge so you can see the agent actually queried the ledger / read the policy. In
+dev Vite proxies `/api` to the API; in the image the built bundle is served by
+FastAPI itself, so it is same-origin in both. The API key is baked at build
+(`VITE_API_KEY`, matching `APP_API_KEY`).
+
+### Packaging / deploy (Phase 4 — implemented)
+
+A multi-stage `Dockerfile` (Node build → Python runtime) produces a single image
+that serves UI + API and generates the synthetic ledger at build time;
+`docker compose up` is the one-command run. The single same-origin container is
+also the shape a free cloud Space expects (`$PORT` override). See ADR-007.
 
 ## Security model
 
