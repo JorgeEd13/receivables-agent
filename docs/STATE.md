@@ -88,11 +88,14 @@ to a Hugging Face Space. Then Phase 5 (MCP server + Claude Code skill + evals).
     data-model section updated.
 
 ## Next
-- **Ship gate (do first):** record `docs/demo.gif` (run `docker compose up` with
-  a `GEMINI_API_KEY`, or local Ollama, and capture 2–3 questions). That + the
-  repo is the "shipped link". Optionally deploy to a Hugging Face Space (Docker
-  SDK; secrets `GEMINI_API_KEY`, `APP_API_KEY`, build-arg `VITE_API_KEY`; set
-  `PRIMARY_PROVIDER=gemini`).
+- **Ship gate (do first):** record `docs/demo.gif` — full step-by-step in
+  [`docs/DEMO.md`](DEMO.md). **Must run on a normal network, not a corporate /
+  sandboxed one:** TLS interception there blocks both the Gemini API and the
+  one-time ONNX embedding download (verified — same cert failure as npm). The
+  personal Linux notebook is the right host (no MITM; GPU for local Ollama if
+  preferred). That GIF + the repo is the "shipped link". Optionally deploy to a
+  Hugging Face Space (Docker SDK; secrets `GEMINI_API_KEY`, `APP_API_KEY`,
+  build-arg `VITE_API_KEY`; `PRIMARY_PROVIDER=gemini`).
 - Phase 5 — AI-native layer (lightweight): MCP server exposing the ledger query
   as a tool; one Claude Code skill (e.g. an eval runner); a small golden-question
   eval suite.
