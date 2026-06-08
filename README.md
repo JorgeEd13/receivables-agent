@@ -14,14 +14,14 @@ text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
 > **Status: working MVP.** The agent, the guarded SQL + RAG tools, the FastAPI
-> service, the React UI and the one-command Docker run are all implemented and
-> tested (Phases 0–4). A public, clean-room portfolio project on 100% synthetic
-> data. See [`PLAN.md`](PLAN.md) for the roadmap and [`docs/STATE.md`](docs/STATE.md)
-> for current progress.
+> service, the React UI, the one-command Docker run and the AI-native layer (MCP
+> server + eval suite) are all implemented and tested (Phases 0–5, 76 tests). A
+> public, clean-room portfolio project on 100% synthetic data. See
+> [`PLAN.md`](PLAN.md) for the roadmap and [`docs/STATE.md`](docs/STATE.md) for
+> current progress.
 
-<!-- Record on a host with a Gemini key (or local Ollama): `docker compose up`,
-     then screen-capture a couple of questions and save as docs/demo.gif. -->
-![Demo](docs/demo.gif)
+<!-- A demo GIF lands here once recorded on a live provider — see docs/DEMO.md.
+     (Omitted for now rather than linking a missing image.) -->
 
 ## What it does
 
@@ -33,6 +33,36 @@ week, and what does our policy say about offering a payment plan?"* The agent:
    (defense in depth: the model can never mutate or escape the database).
 3. Retrieves relevant rules from a **collections-policy knowledge base** (RAG).
 4. Answers in natural language, grounded in both sources.
+
+## Example
+
+> The figures below are **real** — queried live from the synthetic ledger — and
+> the policy reference is the actual section in
+> [`data/collections_policy.md`](data/collections_policy.md). The agent's exact
+> wording is produced by the LLM at run time; this shows the shape of an answer.
+
+**Question**
+
+> Which overdue accounts above $50k should go on credit hold this week, and what
+> policy governs that decision?
+
+**Agent answer**
+
+> **2,719** accounts are overdue above $50k and 60+ days past due. Per the
+> *Credit holds* policy, an account goes on hold once an invoice is **60+ days
+> past due** without a payment commitment (or the balance exceeds the credit
+> limit). Working highest-risk first (the *Prioritisation* rule — 90+ bucket
+> above $50k), the top accounts are:
+>
+> 1. **Hensley-Huang** (enterprise) — ~$10.07M overdue, 186 days past due
+> 2. **Serrano-Jenkins** (enterprise) — ~$8.74M overdue, 247 days past due
+> 3. **Sanders-Banks** (enterprise) — ~$8.36M overdue, 655 days past due
+>
+> Source: *Credit holds* and *Prioritisation rules* sections of the collections
+> policy.
+
+**Tools used:** `query_ledger` (guarded SQL over the ledger) ·
+`search_policy` (retrieval over the collections policy)
 
 ## The data (and why it's realistic)
 

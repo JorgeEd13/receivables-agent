@@ -3,10 +3,13 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 implemented. **All that's left is the live-network run** (one session
-on a normal network — see `docs/DEMO.md`): record `docs/demo.gif`, capture a
-latency number, and run `python -m evals.run` for the accuracy figure. Then the
-README's three live numbers + GIF land and the "shipped link" is complete.
+Phases 0–5 implemented. The README is now safe to link (the broken demo-image
+line is removed; it carries a **real worked example** — figures queried from the
+ledger + the actual policy section), so the repo stands on its own as a portfolio
+link. **What's still preferred before sending to John:** the live-network run
+(one session on a normal network — see `docs/DEMO.md`): record `docs/demo.gif`,
+capture a latency number, and run `python -m evals.run` for the accuracy figure.
+Then the README's live numbers + GIF land and the "shipped link" is complete.
 
 ## Done
 - 2026-06-08: **Phase 5 — AI-native layer.**
