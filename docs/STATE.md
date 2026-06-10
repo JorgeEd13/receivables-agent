@@ -10,6 +10,17 @@ real README numbers from a live session — `python -m evals.run` pass-rate and 
 response latency (see `docs/DEMO.md` §6). The provider used for the demo was local
 Ollama `qwen2.5:7b`.
 
+> **2026-06-10 — deferred again, on purpose (handoff).** Confirmed these two numbers
+> (eval pass-rate + one latency) are recorded **nowhere** yet — they need a live run.
+> NOT done on the production desktop (i3 / 8 GB / no GPU; Ollama server was down) —
+> per the compute split, inference belongs on the **personal Linux notebook** (GPU,
+> normal network, no TLS MITM). Dedicated session to do, with full context already
+> here + in `docs/DEMO.md` §6:
+> 1. On the notebook: `ollama serve` + pull `qwen2.5:7b` (or `llama3.1`); `pip install -e ".[ollama,gemini,data,dev]"`; `python data/generate.py` (build the ledger).
+> 2. `python -m evals.run` → record the **pass-rate** (e.g. "7/7 golden questions pass").
+> 3. Hit `POST /api/chat` once (or watch the demo run) → note **one response latency**.
+> 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
+
 ## Done
 - 2026-06-08: **Ship gate closed — live demo GIF.**
   - First end-to-end live run, on the personal Linux notebook (normal network):
