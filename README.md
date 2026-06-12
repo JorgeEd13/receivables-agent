@@ -1,4 +1,18 @@
-# receivables-agent
+<p align="center">
+  <img src="assets/logo.png" alt="receivables-agent" width="440">
+</p>
+
+<h1 align="center">receivables-agent</h1>
+
+<p align="center"><em>Ask your receivables ledger a plain-language question — get the prioritized accounts <strong>and</strong> the governing policy, cited.</em></p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/tests-76%20passing-brightgreen" alt="76 tests">
+  <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
+  <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
+</p>
 
 **Collections teams burn hours on two questions every day: _who do we chase
 first_, and _what does our policy allow?_** Answering them today means writing
