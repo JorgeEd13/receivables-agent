@@ -3,12 +3,20 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 implemented **and the ship gate is closed**: the live-network run is
-done and `docs/demo.gif` is recorded and embedded in the README, so the repo is a
-complete "shipped link". Still optional (nice-to-have, not blocking): add the two
-real README numbers from a live session — `python -m evals.run` pass-rate and one
-response latency (see `docs/DEMO.md` §6). The provider used for the demo was local
-Ollama `qwen2.5:7b`.
+Phases 0–5 implemented **and the ship gate is closed** (live GIF + README). MVP done.
+
+> **2026-07-02 — Phase 6 planned (public zero-key "click-and-try" demo).** Full design
+> in [`PLAN.md`](../PLAN.md) §"Phase 6". Turns the shipped link into a **click-and-try**
+> link on a **free** CPU tier, no key/install for the visitor. **NEXT SESSION STARTS AT
+> LAYER 1 — the semantic plan-cache — here on the desktop, no model needed.**
+> Load-bearing rule: **cache the question→PLAN (validated SQL), never the question→ANSWER**;
+> always re-execute the read-only SQL live so the number is correct even if the ledger
+> changes / a new scenario is tested. Reuses the existing ChromaDB + MiniLM embeddings;
+> every cached SQL is re-checked by `sql_guard` before running. Layers 2–3 (tiny local LLM
+> hardened with GBNF grammar-constrained tool-calls + KV cache; self-contained `Dockerfile.hf`
+> + `space-deploy` branch reusing forge-pdm F6 mechanics) need the notebook. → ADR-009.
+> Still-pending real numbers (`evals.run` pass-rate + one latency) fold into Layer 4.
+> Demo provider so far was local Ollama `qwen2.5:7b`.
 
 > **2026-06-10 — deferred again, on purpose (handoff).** Confirmed these two numbers
 > (eval pass-rate + one latency) are recorded **nowhere** yet — they need a live run.
