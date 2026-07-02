@@ -3,31 +3,45 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 implemented, ship gate closed. **Phase 6 Layer 1 (semantic plan-cache)
-implemented on the desktop — 88 tests green.** MVP + the honesty-critical caching layer done.
+Phases 0–5 implemented, ship gate closed. Phase 6 Layer 1 (plan-cache) done.
+**Phase 7.1 — hardware-aware model selection — DONE on the notebook (ADR-010).**
+Building it *first* because it feeds Phase 6 Layer 2. **NEXT: Phase 6 Layer 2 —
+hardened tiny local LLM (GBNF grammar-constrained tool-calls + KV cache).**
 
-> **2026-07-02 — PLANNED (next sessions): Phase 7 — FIA-parity sweep + hardware-awareness
-> (see `PLAN.md` Phase 7).** Two things surfaced: (1) receivables has **no** hardware-aware
-> model selection, and the private FIA (`fleet_intelligence_agent`) does (`utils/hardware.py`
-> — RAM/VRAM/CPU detection → Ollama model recommendation, stdlib fallbacks, `--select` mode);
-> (2) more broadly, FIA carries engineering that never made it to the **real public showcase**.
-> Plan, in order:
-> - **7.1 (do first, feeds Phase 6):** port/reimprove `hardware.py` and wire it into
->   `src/agent/providers.py` so the local path **auto-picks tiny-vs-strong by detected
->   hardware** — this makes Phase 6's "works as a demo, shines with a better model" real *from
->   the start*, not just a README claim. Clean-room OK: `hardware.py` has zero confidential data
->   (public model names + generic `psutil`/`nvidia-smi`) — the rule bars *confidential* material,
->   not reusing our own engineering; copy-and-adapt **or** rewrite-if-better.
-> - **7.2 (dedicated full-scan session):** audit the *whole* FIA feature set for what's
->   pertinent here. **Start by mining `(private career repo)` for the FIA
->   "engenuity" entries** (fastest index of transfer-worthy techniques), then sweep the FIA repo
->   for anything ACHADOS missed. Record kept/improved/dropped per item.
-> - **7.3:** upgrade `docker-compose.yml` from single-service/Gemini-only to a **multi-service**
->   (app + `ollama` + models volume) stack — the pertinent IaC step here. (The heavier managed-
->   cloud IaC is already owned/shipped by the sibling `forge-pdm-mlops` — don't duplicate.)
+> **2026-07-02 — Phase 7.1 DONE (hardware-aware selection, ADR-010).** New
+> `src/core/hardware.py`: detects RAM/VRAM(nvidia-smi)/CPU → *effective memory*
+> heuristic (VRAM if real GPU else ~80% RAM) → picks the best-fitting **downloaded**
+> model from a public LLM catalog (falls back to best-that-would-fit). Wired into
+> `resolve_ollama_model` (`src/agent/providers.py`): `OLLAMA_MODEL=auto` (now the
+> **default**) resolves the local model at construction; a concrete tag overrides.
+> LLM-only catalog (embeddings stay ChromaDB ONNX MiniLM, ADR-005) → no Ollama
+> embedder to pick. **No new dependency** (psutil optional; stdlib `/proc`/`wmic`/
+> `nvidia-smi` fallbacks so the diagnostic runs with the system Python). CLI:
+> `python -m src.core.hardware` (table) · `--json` · `--select` (emits
+> `OLLAMA_MODEL=…` for a container entrypoint). `tests/test_hardware.py` — 11
+> offline tests (effective-memory GPU-vs-CPU, tiny-iGPU-ignored, best-downloaded-
+> that-fits, skip-too-big-downloaded, fallback-to-best-fits, tag-tolerant match,
+> `auto` resolves + never-empty). **Full suite: 99 green** (was 88 pre-7.1).
+> **Verified live on the notebook** (RTX 4050 / 6 GB VRAM / `qwen2.5:7b` pulled) →
+> `--select` emits `OLLAMA_MODEL=qwen2.5:7b`; a 16 GB CPU tier would pick a tiny
+> model instead. This makes Phase 6's "shines with a better model" real from run one.
 >
-> None of this is coded yet — desktop was closing. Best next machine for 7.1/7.2 is the one that
-> can run Ollama + a GPU (the notebook), same as the Phase 6 Layers 2–4 work.
+> **Remaining Phase 7 (later sessions):**
+> - **7.2 (dedicated full-scan session):** audit the *whole* FIA feature set. Start
+>   by mining `(private career repo)` FIA "engenuity" entries, then
+>   sweep the FIA repo. Record kept/improved/dropped per item.
+> - **7.3:** upgrade `docker-compose.yml` single-service/Gemini-only →
+>   **multi-service** (app + `ollama` + models volume); a compose entrypoint can
+>   call `python -m src.core.hardware --select` to choose the model to pull.
+
+> **NEXT — Phase 6 Layer 2 (needs this notebook: model + normal network).**
+> Hardened tiny local LLM (`qwen2.5:0.5b`/`1.5b` Q4_K_M) with **GBNF
+> grammar-constrained tool-calls** (kills malformed-JSON, the #1 small-model
+> failure) + KV/prompt caching on the long system-prompt prefix. Then Layer 3
+> (self-contained `Dockerfile.hf` + `space-deploy` branch reusing forge-pdm F6
+> mechanics) and Layer 4 (README live link + the two pending numbers: `evals.run`
+> pass-rate + one latency, ideally tiny-vs-strong to show the delta). Also here:
+> `python -m data.seed_plan_cache` to pre-warm the demo cache, and `python -m evals.run`.
 
 > **2026-07-02 — Phase 6 LAYER 1 DONE (semantic plan-cache, ADR-009).** Built entirely
 > here on the CPU-only desktop, no model needed. Cache the question→**PLAN** (the agent's
@@ -62,6 +76,23 @@ implemented on the desktop — 88 tests green.** MVP + the honesty-critical cach
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
 ## Done
+- 2026-07-02: **Phase 7.1 — hardware-aware local model selection (ADR-010).**
+  - `src/core/hardware.py`: `detect_hardware()` (RAM via psutil/`/proc`, CPU,
+    NVIDIA VRAM via `nvidia-smi`); `HardwareProfile.effective_memory_gb` (VRAM if
+    real GPU, else ~80% RAM); `recommend_model()` picks the best-quality model
+    that fits **and** is downloaded from a public LLM catalog (`_CATALOG`,
+    tiny→strong), falling back to best-that-would-fit. `list_downloaded_models()`
+    hits Ollama `/api/tags` (stdlib urllib, fails soft). CLI `python -m
+    src.core.hardware` + `--json` + `--select`.
+  - `src/agent/providers.py`: `resolve_ollama_model()` — `OLLAMA_MODEL=auto`
+    (new default in `config.py` + `.env.example`) resolves via hardware at model
+    construction; concrete tag passes through; always returns a real tag.
+  - Clean-room reuse of FIA's `utils/hardware.py` engineering (public data only),
+    rewritten in English; dropped the embed catalog (embeddings are ChromaDB ONNX,
+    ADR-005). No new dependency (psutil optional; stdlib fallbacks).
+  - `tests/test_hardware.py`: 11 offline tests (mock detectors). Full suite: **99
+    passing**. Verified live on the notebook.
+  - ADR-010 written; PLAN 7.1 marked done; CLAUDE.md file-map updated.
 - 2026-07-02: **Phase 6 — Layer 1: semantic plan-cache (ADR-009).**
   - `src/agent/plan_cache.py`: a *plan* = the agent's tool calls (validated
     `query_ledger` SQL + `search_policy` query), stored in a ChromaDB collection

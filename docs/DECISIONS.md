@@ -5,6 +5,58 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-010 — Hardware-aware local model selection (`OLLAMA_MODEL=auto`)
+
+**Status:** Accepted · 2026-07-02
+
+### Context
+
+Phase 6 sells the demo as *"runs a tiny model on free CPU, shines with a better
+model."* Pinning a single `OLLAMA_MODEL` in config makes that a **README
+promise**: on a 16 GB / 2-CPU free tier a 7B tag stalls or OOMs, while on a dev
+box with a GPU a pinned 0.5B needlessly throws away capability. The local path
+should scale to the box it runs on — from the first request, with no manual
+retune per machine. (The private `fleet_intelligence_agent` already does this;
+its `utils/hardware.py` holds **zero confidential data** — public Ollama model
+names + generic `psutil`/`nvidia-smi` detection — so the clean-room rule permits
+reusing our own engineering, adapted to this repo's English/style.)
+
+### Decision
+
+Add `src/core/hardware.py`: detect RAM / NVIDIA-VRAM / CPU, compute an
+**effective memory** heuristic (VRAM if a real GPU is present, else ~80 % of RAM),
+and pick from a **public catalog** the highest-quality model that both *fits* and
+is *already downloaded* (falling back to the best that *would* fit if none is
+pulled yet). `OLLAMA_MODEL=auto` (now the default) triggers this in
+`resolve_ollama_model` (`src/agent/providers.py`) at model construction; a
+concrete tag still overrides — the HF CPU demo pins the tiny floor explicitly.
+
+- **LLM-only catalog.** Embeddings are ChromaDB's bundled ONNX MiniLM (ADR-005),
+  so there is no Ollama embedder to select — dropped FIA's embed catalog.
+- **No new dependency.** `psutil` is used *if present*; every detector has a
+  stdlib fallback (`/proc`, `os`, `nvidia-smi`, `wmic`), so the diagnostic runs
+  with the system Python before any `pip install`.
+- **Diagnostic + machine-readable modes.** `python -m src.core.hardware` prints a
+  readable table; `--json` and `--select` (emits `OLLAMA_MODEL=…`) let a
+  container entrypoint / compose consume the choice.
+- **Offline-testable.** Detectors are separable; `tests/test_hardware.py`
+  constructs `HardwareProfile` directly and monkeypatches detection, honouring
+  the "unit tests run offline" rule (no `nvidia-smi`, no Ollama).
+
+### Consequences
+
+- Phase 6's tiny-vs-strong claim is **real from run one**: verified live on the
+  notebook (RTX 4050, 6 GB VRAM, `qwen2.5:7b` pulled) → `auto` resolves to
+  `qwen2.5:7b`; a 16 GB CPU tier would resolve to a tiny model instead.
+- `resolve_ollama_model` **always returns a concrete tag** (tiny floor if
+  detection yields nothing), so `ChatOllama` construction never fails; a
+  genuinely unusable local box is still covered by the provider fallback (ADR-004)
+  at call time.
+- Feeds Phase 6 Layer 2 (the hardened tiny local LLM) and Phase 7.3 (a
+  multi-service compose can call `--select` to choose the model to pull).
+
+---
+
 ## ADR-009 — Semantic plan-cache: cache the *plan*, never the answer
 
 **Status:** Accepted · 2026-07-02

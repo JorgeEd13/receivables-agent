@@ -30,7 +30,8 @@ patterns from scratch and contains no proprietary code or data.
                        plan-cache (`plan_cache` / `plan_replay` / `cached_agent`, ADR-009)
 - `src/rag/`         — ChromaDB indexer + embeddings
 - `src/api/`         — FastAPI app (lifespan, auth, routes)
-- `src/core/`        — config + Pydantic schemas
+- `src/core/`        — config + Pydantic schemas + hardware-aware model
+                       selection (`hardware.py`, ADR-010)
 - `web/`             — React chat UI
 - `mcp_server/`      — MCP server exposing the ledger as a tool (not `mcp/` — that
                        would shadow the MCP SDK package; see ADR-008)

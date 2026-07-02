@@ -34,7 +34,10 @@ class Settings(BaseSettings):
     fallback_provider: Provider | None = "gemini"
 
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1"
+    # "auto" = hardware-aware selection (ADR-010): pick the best local model that
+    # fits the detected RAM/VRAM at startup. Pin a concrete tag (e.g. "llama3.1")
+    # to override — the HF CPU demo pins the tiny floor model explicitly.
+    ollama_model: str = "auto"
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.0-flash"

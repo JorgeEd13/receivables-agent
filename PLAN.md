@@ -138,7 +138,12 @@ Bring over everything **pertinent** (FIA is clean-room-safe to draw from: its
 reusing our own good engineering — copy-and-adapt or rewrite-if-better, keeping it in
 this repo's English/style). Do the audit first, then port by pertinence.
 
-**7.1 — Hardware-aware model selection (headline; do first, feeds Phase 6).**
+**7.1 — Hardware-aware model selection (headline; do first, feeds Phase 6).  ✅ (ADR-010)**
+Done: `src/core/hardware.py` (RAM/VRAM/CPU detection, public LLM catalog,
+effective-memory heuristic, `--json`/`--select` CLI), wired into
+`resolve_ollama_model` in `src/agent/providers.py` via `OLLAMA_MODEL=auto` (new
+default). Offline tests in `tests/test_hardware.py`; verified live on the notebook
+(RTX 4050 → `auto` picks `qwen2.5:7b`). Original scope below.
 - Port/reimplement FIA's `utils/hardware.py`: detect RAM / VRAM (nvidia-smi) / CPU;
   a small **public** Ollama model catalog (name, RAM/VRAM need, quality) → recommend
   the best model that *fits*; "effective memory" heuristic (VRAM if GPU, else ~80% RAM).
