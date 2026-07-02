@@ -3,10 +3,39 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 implemented, ship gate closed. Phase 6 Layer 1 (plan-cache) done.
-**Phase 7.1 — hardware-aware model selection — DONE on the notebook (ADR-010).**
-Building it *first* because it feeds Phase 6 Layer 2. **NEXT: Phase 6 Layer 2 —
-hardened tiny local LLM (GBNF grammar-constrained tool-calls + KV cache).**
+Phases 0–5 done. Phase 6 Layer 1 (plan-cache) + Phase 7.1 (hardware-aware
+selection, ADR-010) + **Phase 6 Layer 2 (grammar-constrained tool-calls, ADR-011)
+— all DONE on the notebook.** Suite **110 green**. **NEXT: Phase 6 Layer 3 —
+self-contained `Dockerfile.hf` + `space-deploy` branch (reuse forge-pdm F6), then
+Layer 4 (README live link + tiny-vs-strong numbers).**
+
+> **2026-07-02 — Phase 6 LAYER 2 DONE (grammar-constrained tool-calls, ADR-011).**
+> **Tested first (per the "measure, don't assume" call) and it refuted the plan's
+> premise:** native tool-calling on tiny models fails, but NOT from malformed JSON.
+> Measured on the real tools/prompt (5 golden Qs, temp 0): `qwen2.5:0.5b` emits
+> valid JSON but **invents fake arg fields + omits `sql`** (~1/5); `qwen2.5:1.5b`
+> writes **correct SQL in prose, no tool call at all** (0/5). So a valid-JSON grammar
+> would fix nothing. Fix: constrain the WHOLE reply to a `{tool, sql|query, answer}`
+> schema via Ollama `format` (GBNF underneath) + translate to `tool_calls`. New
+> `src/agent/constrained.py::ConstrainedToolModel` (BaseChatModel wrapper; `final_answer`
+> option lets the ReAct loop end); tier-gated in `providers.should_constrain`
+> (`constrained_tool_calls=auto` wraps only tiny catalog models, reusing ADR-010's
+> `quality`); strong models keep native tool-calling (constraining them would hurt).
+> Added `ollama_keep_alive`/`num_ctx` (KV cache). **Measured: ≤1/5 → 5/5 valid+routed+
+> filled.** End-to-end on the real agent+ledger, `qwen2.5:1.5b` completes the full loop
+> (tool call → guarded SQL → final answer with a real number; top-3 customers w/ balances,
+> ~2–4 s on GPU). Caveat (honest, in ADR): `format` fixes STRUCTURE not SQL correctness —
+> a 0.5B still writes weak SQL (may not filter "90 days" precisely); plan-cache serves
+> curated-correct SQL for headline Qs, guard makes bad SQL safe on misses. This IS the
+> "shines with a better model" story, now with numbers. `tests/test_constrained.py` (11).
+> **Demo decision: ship BOTH tiny models, default `qwen2.5:1.5b`** (better SQL; 0.5b =
+> extreme floor a tester can flip to via `OLLAMA_MODEL`). ADR-011 + PLAN L2 done.
+>
+> **NEXT — Phase 6 Layer 3 + 4 (this notebook).** L3: self-contained `Dockerfile.hf`
+> (tiny model baked/pulled at startup, distinct from the Gemini `Dockerfile`) +
+> `space-deploy` branch with HF front-matter, reusing forge-pdm F6 mechanics + its 3
+> container gotchas. L4: README live Space link + capture the two pending numbers
+> (`python -m evals.run` pass-rate + one latency), ideally tiny-vs-strong to show the delta.
 
 > **2026-07-02 — Phase 7.1 DONE (hardware-aware selection, ADR-010).** New
 > `src/core/hardware.py`: detects RAM/VRAM(nvidia-smi)/CPU → *effective memory*
@@ -76,6 +105,26 @@ hardened tiny local LLM (GBNF grammar-constrained tool-calls + KV cache).**
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
 ## Done
+- 2026-07-02: **Phase 6 Layer 2 — grammar-constrained tool-calls (ADR-011).**
+  - Probed native tool-calling on `qwen2.5:0.5b`/`1.5b` (real tools+prompt, 5
+    golden Qs) → refuted the malformed-JSON premise: 0.5b invents fake arg fields
+    + omits `sql` (~1/5); 1.5b writes SQL in prose, 0 tool calls. Structured
+    output (`format`=schema) → both **5/5** valid+routed+filled.
+  - `src/agent/constrained.py`: `ConstrainedToolModel` (BaseChatModel wrapper) —
+    `bind_tools` builds a `{tool, sql|query, answer}` schema (+ `final_answer` to
+    end the loop); `_generate`/`_agenerate` bind `format=schema`, parse, return an
+    `AIMessage` with one `tool_calls` entry or final content; malformed/off-menu
+    degrades to plain content. Presents as a chat model → create_react_agent,
+    plan-cache, guard, evals all unchanged.
+  - `src/agent/providers.py`: `should_constrain()` tier-gates via ADR-010 catalog
+    `quality` (`auto` wraps tiny only; `on`/`off` force); `build_chat_model` wraps
+    the tiny Ollama path + passes `num_ctx`/`keep_alive`. New `hardware.catalog_quality()`.
+  - Config: `constrained_tool_calls` / `constrained_quality_max` / `ollama_num_ctx`
+    / `ollama_keep_alive` (+ `.env.example`).
+  - `tests/test_constrained.py`: 11 offline tests (schema, parse tool-call/final/
+    malformed/foreign-field/unknown-tool, format passed through, tier gating).
+    Full suite: **110 passing**. Verified end-to-end live on the notebook.
+  - ADR-011 written; PLAN Layer 2 done; CLAUDE.md file-map updated.
 - 2026-07-02: **Phase 7.1 — hardware-aware local model selection (ADR-010).**
   - `src/core/hardware.py`: `detect_hardware()` (RAM via psutil/`/proc`, CPU,
     NVIDIA VRAM via `nvidia-smi`); `HardwareProfile.effective_memory_gb` (VRAM if

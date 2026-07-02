@@ -64,16 +64,45 @@ def resolve_ollama_model(settings: Settings) -> str:
     return chosen
 
 
+def should_constrain(model_name: str, settings: Settings) -> bool:
+    """Whether to wrap a local model in the grammar-constrained shim (ADR-011).
+
+    ``off``/``on`` are explicit; ``auto`` wraps only tiny models — those at or
+    below ``constrained_quality_max`` in the hardware catalog (unknown tags are
+    left native, on the assumption they're a deliberate, capable choice).
+    """
+    mode = settings.constrained_tool_calls
+    if mode == "off":
+        return False
+    if mode == "on":
+        return True
+    from src.core.hardware import catalog_quality
+
+    quality = catalog_quality(model_name)
+    return quality is not None and quality <= settings.constrained_quality_max
+
+
 def build_chat_model(provider: Provider, settings: Settings) -> BaseChatModel:
     """Construct a chat model for `provider` (no network call at construction)."""
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
-        return ChatOllama(
-            model=resolve_ollama_model(settings),
+        model_name = resolve_ollama_model(settings)
+        kwargs: dict = {"num_ctx": settings.ollama_num_ctx} if settings.ollama_num_ctx else {}
+        if settings.ollama_keep_alive:
+            kwargs["keep_alive"] = settings.ollama_keep_alive
+        base = ChatOllama(
+            model=model_name,
             base_url=settings.ollama_base_url,
             temperature=0,
+            **kwargs,
         )
+        if should_constrain(model_name, settings):
+            from src.agent.constrained import ConstrainedToolModel
+
+            logger.info("constrained tool-calls ON for tiny model %s (ADR-011)", model_name)
+            return ConstrainedToolModel(base=base)
+        return base
     if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 

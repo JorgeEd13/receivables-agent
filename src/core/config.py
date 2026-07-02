@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     # fits the detected RAM/VRAM at startup. Pin a concrete tag (e.g. "llama3.1")
     # to override — the HF CPU demo pins the tiny floor model explicitly.
     ollama_model: str = "auto"
+    # Ollama runtime knobs: num_ctx sizes the context window; keep_alive pins the
+    # model in memory so the KV/prompt cache on the long system prefix survives
+    # between turns (near-free latency win on the local path). None = server default.
+    ollama_num_ctx: int | None = None
+    ollama_keep_alive: str | None = "10m"
+
+    # --- Grammar-constrained tool-calls for tiny models (Phase 6 L2, ADR-011) ---
+    # Small models can't tool-call natively; constrain their reply to the tool
+    # schema (Ollama `format`) and translate it back to tool_calls.
+    #   auto = wrap only models at/below `constrained_quality_max` in the catalog;
+    #   on   = always wrap the Ollama path; off = never (native tool-calling).
+    constrained_tool_calls: Literal["auto", "on", "off"] = "auto"
+    constrained_quality_max: int = Field(default=3, ge=1, le=10)
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.0-flash"

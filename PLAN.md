@@ -97,7 +97,16 @@ caching — see the semantic-cache research; validated by SemanticALLI / Chillar
   unsafe or wrong plan because the plan is re-validated and read-only.
 - Expected hit-rate on a demo: 30–70% (visitors ask similar things: top overdue, DSO, aging).
 
-**Layer 2 — Hardened tiny local LLM.**
+**Layer 2 — Hardened tiny local LLM.  ✅ (ADR-011)**
+Done: probed native tool-calling on `qwen2.5:0.5b`/`1.5b` and **refuted the
+malformed-JSON premise** — the real failure is the native tool-calling *channel*
+(0.5b invents fake args/omits `sql`; 1.5b writes SQL in prose, no tool call). Fix
+shipped: `src/agent/constrained.py::ConstrainedToolModel` constrains the reply to
+a `{tool, sql|query, answer}` JSON schema (Ollama `format`) + translates to
+`tool_calls`; tier-gated in `providers.should_constrain` (auto-wrap tiny only) +
+`ollama_keep_alive`/`num_ctx` for KV cache. Measured ≤1/5 → **5/5**; end-to-end on
+the real agent+ledger, 1.5b completes the loop. `tests/test_constrained.py` (11).
+Original scope below.
 - `qwen2.5:0.5b`/`1.5b` quantized (Q4_K_M), tool-capable, fits the HF free tier (16 GB / 2 CPU).
 - **Grammar-constrained decoding (GBNF / `response_format`)** forcing valid tool-call JSON —
   kills the #1 failure mode of small-model tool-calling (malformed JSON). This is what makes

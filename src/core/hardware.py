@@ -243,6 +243,19 @@ def _normalize(name: str) -> str:
     return name.split(":")[0].lower() if ":" not in name else name.lower()
 
 
+def catalog_quality(name: str) -> int | None:
+    """The catalog quality rank (1–10) for a model tag, or ``None`` if unknown.
+
+    Used to decide whether a model is "tiny" (low rank → needs the constrained
+    tool-call path, ADR-011) or strong enough to trust native tool-calling.
+    """
+    target = _normalize(name)
+    for spec in _CATALOG:
+        if _normalize(spec.name) == target:
+            return spec.quality
+    return None
+
+
 def recommend_model(
     profile: HardwareProfile,
     downloaded: list[str],

@@ -5,6 +5,70 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-011 — Grammar-constrained tool-calling for tiny local models
+
+**Status:** Accepted · 2026-07-02
+
+### Context
+
+Phase 6's demo runs a tiny local model on a free CPU tier. But **measured** on
+this repo's real tools + prompt (5 golden questions, `temperature=0`), native
+tool-calling via `bind_tools` is unusable on tiny models — and *not* for the
+reason the plan assumed (malformed JSON):
+
+- `qwen2.5:0.5b` — emits **syntactically valid** JSON but **invents fictional
+  argument fields** (`issue_date`, `aging_bucket`, …) and omits the real `sql`
+  field; routes to the wrong tool most of the time. ~1/5 usable.
+- `qwen2.5:1.5b` — writes **correct SQL in prose/markdown** and emits **no tool
+  call at all**. 0/5.
+
+So a GBNF grammar that only guarantees *valid JSON* would fix nothing here. The
+real defect is that the native tool-calling **channel** is unreliable on tiny
+models — one produces schema-non-conformant args, the other bypasses the channel.
+
+### Decision
+
+Constrain the model's **entire reply** to a JSON schema (Ollama's `format`
+option — a GBNF grammar under the hood) that encodes the whole ReAct decision,
+then translate that JSON back into `AIMessage.tool_calls`:
+
+```json
+{"tool": "query_ledger" | "search_policy" | "final_answer",
+ "sql": "…", "query": "…", "answer": "…"}   // only `tool` required
+```
+
+- `src/agent/constrained.py::ConstrainedToolModel` is a `BaseChatModel` wrapper:
+  `bind_tools` builds the schema from the bound tools (+ a `final_answer` option
+  so the loop can terminate); `_generate` binds `format=schema`, parses the reply,
+  and returns either an `AIMessage` with one `tool_calls` entry or a final-answer
+  content message. Malformed / off-menu output degrades to plain content rather
+  than crashing.
+- Because it presents as a normal chat model, **`create_react_agent`, the
+  plan-cache (ADR-009), the SQL guard (ADR-003) and the evals are unchanged** —
+  only the local model's *channel* changes.
+- **Tier-gated** (`providers.should_constrain`, reusing ADR-010's catalog
+  `quality`): `constrained_tool_calls=auto` wraps only tiny models
+  (`quality <= constrained_quality_max`, default 3); strong/cloud models keep
+  native tool-calling (constraining them would *reduce* quality). `on`/`off`
+  force it. Also added `ollama_num_ctx` / `ollama_keep_alive` (KV/prompt cache).
+
+### Consequences
+
+- **Measured:** structured output takes both tiny models from ≤1/5 to **5/5**
+  valid + routed + filled tool calls. End-to-end on the real agent + ledger,
+  `qwen2.5:1.5b` now completes the full loop (tool call → guarded SQL → final
+  answer with a real number; e.g. top-3 customers with balances, ~2–4 s on GPU).
+- **`format` fixes structure, not SQL correctness** — a 0.5B model still writes
+  weak SQL (e.g. it may not filter "90 days" precisely). That is by design the
+  "shines with a better model" story, now backed by numbers: the *architecture*
+  is reliable at 0.5B, *answer quality* climbs with model size. The plan-cache
+  serves curated-correct SQL for the headline demo questions; the SQL guard makes
+  a tiny model's bad SQL safe (rejected/handled) on novel cache-miss questions.
+- Feeds Layer 3 (the HF demo image pins a tiny model + this shim) and Layer 4
+  (the tiny-vs-strong numbers the README will quote).
+
+---
+
 ## ADR-010 — Hardware-aware local model selection (`OLLAMA_MODEL=auto`)
 
 **Status:** Accepted · 2026-07-02
