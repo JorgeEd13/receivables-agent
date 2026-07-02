@@ -66,6 +66,17 @@ strong model at it and it shines" story stays honest and front-and-center. The
 repeated questions, provably better with a strong model. This mirrors the repo's
 existing dual-provider/fallback philosophy, so it reads as consistent, not bolted-on.
 
+**Hardware-awareness is load-bearing to this principle, and must be present from the
+start (not bolted on later).** "Works fine as a demo, shines with a better model" is
+only honest if the app *detects the box it runs on* and picks the model that fits:
+the tiny grammar-constrained model is the **floor for the free HF CPU tier**, but on a
+machine with more RAM / a GPU the same code should auto-select a stronger local model
+(and a cloud key, when present, is always the ceiling). This is exactly what the
+private FIA (`fleet_intelligence_agent`) proved with its `utils/hardware.py`
+(RAM/VRAM/CPU detection → Ollama model recommendation, with stdlib-only fallbacks and a
+`--select` machine-readable mode a bootstrap can `eval`). receivables is the **real
+public showcase**, so the pertinent engineering from FIA belongs here — see Phase 7.
+
 **Load-bearing correctness rule (do NOT violate):** never cache a question→**answer**
 over mutable data — a frozen number is fragile and, in a showcase, dishonest (regenerate
 the ledger with more/fewer customers, or test a new scenario, and a cached answer lies).
@@ -116,6 +127,52 @@ no model)** — it alone resolves the mutable-data concern and is the highest-va
 Layers 2–3 need the notebook (model + normal network, same constraint as the original ship
 gate). Layer 4 closes it. → ADR-009 (plan-cache = cache reasoning not answers · grammar-
 constrained tool-calls · self-contained zero-key image, separate from the Gemini path).
+
+### Phase 7 — FIA-parity sweep + hardware-awareness  ⏳ (planned — next sessions)
+
+**Why:** receivables is the **real public showcase for the AI-Engineer axis**, yet the
+private FIA (`fleet_intelligence_agent`) carries engineering that never made it here.
+Bring over everything **pertinent** (FIA is clean-room-safe to draw from: its
+`hardware.py` holds **zero confidential data** — public Ollama model names + generic
+`psutil`/`nvidia-smi` detection; the clean-room rule bars *confidential* material, not
+reusing our own good engineering — copy-and-adapt or rewrite-if-better, keeping it in
+this repo's English/style). Do the audit first, then port by pertinence.
+
+**7.1 — Hardware-aware model selection (headline; do first, feeds Phase 6).**
+- Port/reimplement FIA's `utils/hardware.py`: detect RAM / VRAM (nvidia-smi) / CPU;
+  a small **public** Ollama model catalog (name, RAM/VRAM need, quality) → recommend
+  the best model that *fits*; "effective memory" heuristic (VRAM if GPU, else ~80% RAM).
+- Wire it into `src/agent/providers.py` model selection so the local path **auto-picks
+  tiny-vs-strong by detected hardware**: the Q4 tiny model is the HF-CPU floor, a bigger
+  local model is chosen automatically where the box allows, cloud key = ceiling. This is
+  what makes Phase 6's "shines with a better model" claim *real from the start*, not a
+  README promise.
+- Keep FIA's nice touches where they earn their place: a diagnostic CLI
+  (`python -m ... hardware` → readable table) and a `--select` machine-readable mode a
+  container entrypoint / compose can consume. Offline-testable (mock the detectors) so
+  it fits the "unit tests run offline" rule.
+- → new ADR (hardware-aware selection; catalog is public data; clean-room note that
+  reusing FIA engineering ≠ leaking the employer data).
+
+**7.2 — FIA→receivables parity audit (the rest).** A **dedicated full-scan session**:
+walk the whole FIA feature set and port what's pertinent to a public AR-agent showcase
+(skip anything the employer/GPS-specific). **Accelerator (start here, don't stop here):** mine
+`(private career repo)` for the FIA "engenuity" entries — they already flag
+the CV/post-worthy techniques, so they're the fastest index of what's worth transferring.
+Then sweep the FIA repo itself for anything the ACHADOS didn't capture. Candidates to
+check — richer provider fallback ergonomics, the hardware diagnostic UX, any
+guardrail/prompt refinements, RAG/indexer niceties, `.env`/config ergonomics. Record
+kept / improved / dropped per item (ADR or a short table), so the sweep is auditable and
+not a vague "port stuff" task.
+
+**7.3 — Compose upgrade (the pertinent IaC step here).** Today's `docker-compose.yml` is
+**single-service and Gemini-only** (it even pins `PRIMARY_PROVIDER: gemini`, overriding
+`.env` — a documented gotcha). Upgrade it to a **multi-service** local stack (app +
+`ollama` service + a models volume) so `docker compose up` stands up the *whole* local
+agent, hardware-aware model and all — turning the file from "containerized" into real
+orchestration and killing the "Ollama-in-Docker unsupported" gotcha. (The heavier
+IaC/managed-cloud rungs — Cloud Run + managed DB — are already owned and largely shipped
+by the sibling `forge-pdm-mlops`; no need to duplicate them here.)
 
 ## MVP cut
 

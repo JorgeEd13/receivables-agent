@@ -6,6 +6,29 @@
 Phases 0–5 implemented, ship gate closed. **Phase 6 Layer 1 (semantic plan-cache)
 implemented on the desktop — 88 tests green.** MVP + the honesty-critical caching layer done.
 
+> **2026-07-02 — PLANNED (next sessions): Phase 7 — FIA-parity sweep + hardware-awareness
+> (see `PLAN.md` Phase 7).** Two things surfaced: (1) receivables has **no** hardware-aware
+> model selection, and the private FIA (`fleet_intelligence_agent`) does (`utils/hardware.py`
+> — RAM/VRAM/CPU detection → Ollama model recommendation, stdlib fallbacks, `--select` mode);
+> (2) more broadly, FIA carries engineering that never made it to the **real public showcase**.
+> Plan, in order:
+> - **7.1 (do first, feeds Phase 6):** port/reimprove `hardware.py` and wire it into
+>   `src/agent/providers.py` so the local path **auto-picks tiny-vs-strong by detected
+>   hardware** — this makes Phase 6's "works as a demo, shines with a better model" real *from
+>   the start*, not just a README claim. Clean-room OK: `hardware.py` has zero confidential data
+>   (public model names + generic `psutil`/`nvidia-smi`) — the rule bars *confidential* material,
+>   not reusing our own engineering; copy-and-adapt **or** rewrite-if-better.
+> - **7.2 (dedicated full-scan session):** audit the *whole* FIA feature set for what's
+>   pertinent here. **Start by mining `(private career repo)` for the FIA
+>   "engenuity" entries** (fastest index of transfer-worthy techniques), then sweep the FIA repo
+>   for anything ACHADOS missed. Record kept/improved/dropped per item.
+> - **7.3:** upgrade `docker-compose.yml` from single-service/Gemini-only to a **multi-service**
+>   (app + `ollama` + models volume) stack — the pertinent IaC step here. (The heavier managed-
+>   cloud IaC is already owned/shipped by the sibling `forge-pdm-mlops` — don't duplicate.)
+>
+> None of this is coded yet — desktop was closing. Best next machine for 7.1/7.2 is the one that
+> can run Ollama + a GPU (the notebook), same as the Phase 6 Layers 2–4 work.
+
 > **2026-07-02 — Phase 6 LAYER 1 DONE (semantic plan-cache, ADR-009).** Built entirely
 > here on the CPU-only desktop, no model needed. Cache the question→**PLAN** (the agent's
 > guard-validated tool calls), **never** the answer; on a hit the plan is **re-executed
