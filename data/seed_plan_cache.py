@@ -1,0 +1,69 @@
+"""Pre-warm the semantic plan-cache with example questions (ADR-009).
+
+The plan-cache warms itself as visitors ask questions, but a demo feels better
+if the *first* click is already instant. This script asks the agent a handful of
+representative questions **once** — using a real provider — and lets the normal
+warm path store each guard-validated plan. Nothing here is hand-written SQL: the
+seeded plans are authored by the live agent, then re-executed live on every hit,
+so they can never go stale.
+
+Run it once, on a machine with a provider (a running Ollama or ``GEMINI_API_KEY``)
+and after the ledger exists, before shipping the Space image:
+
+    python data/generate.py            # build the ledger (needs the 'data' extra)
+    python -m data.seed_plan_cache     # warm the cache (needs a provider)
+
+The cache persists under ``chroma_path`` alongside the policy index, so a baked
+image ships pre-warmed. Requires ``plan_cache_enabled`` (the default).
+"""
+
+from __future__ import annotations
+
+# Representative of what a reviewer actually types at the demo: the aging / DSO /
+# top-overdue / policy questions people ask of a receivables agent. Kept close to
+# the golden set so the seeded plans are the ones most likely to be hit.
+SEED_QUESTIONS: list[str] = [
+    "How many customers are in the ledger?",
+    "What is our current DSO?",
+    "Which single customer has the largest overdue balance?",
+    "Show me the total overdue amount by aging bucket.",
+    "Who are the top 10 customers by overdue balance?",
+    "What does our policy say about credit holds?",
+    "At how many days past due does an invoice become a write-off candidate?",
+    "When is a customer eligible for a payment plan?",
+]
+
+
+def main() -> int:
+    from src.agent.cached_agent import CachedAgent
+    from src.agent.graph import build_agent
+    from src.core.config import get_settings
+
+    settings = get_settings()
+    if not settings.plan_cache_enabled:
+        print("plan_cache_enabled is False — nothing to seed.")
+        return 1
+
+    agent = build_agent(settings)
+    if not isinstance(agent, CachedAgent):
+        print("Agent is not cache-wrapped; check plan_cache_enabled.")
+        return 1
+
+    warmed = 0
+    for question in SEED_QUESTIONS:
+        # A single-message turn is the cache-eligible shape; the wrapper warms
+        # the plan on a miss automatically.
+        agent.invoke({"messages": [{"role": "user", "content": question}]})
+        # Confirm it landed (a lookup now hits).
+        if agent._cache.lookup(question) is not None:  # noqa: SLF001 - seeding tool
+            warmed += 1
+            print(f"  ✓ cached plan for: {question}")
+        else:
+            print(f"  · not cached (no groundable plan): {question}")
+
+    print(f"\nWarmed {warmed}/{len(SEED_QUESTIONS)} example plans.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

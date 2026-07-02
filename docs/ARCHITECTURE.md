@@ -106,6 +106,31 @@ used together: `query_ledger` (numbers) and `search_policy` (rules).
 Configuration lives in `src/core/config.py` (`pydantic-settings`, read from the
 environment / `.env`).
 
+### Semantic plan-cache (Phase 6 — implemented)
+
+On the free-CPU demo the LLM is the slow part of a turn, so `src/agent/` also
+carries a **semantic plan-cache** that skips it for questions the agent has
+effectively answered before — **without ever caching a stale number** (ADR-009).
+
+- **`plan_cache.py`** — a *plan* is the agent's tool calls (validated
+  `query_ledger` SQL + `search_policy` query text), stored in a ChromaDB
+  collection keyed by the question embedding (the **same** local MiniLM
+  embeddings as RAG — no new dependency). `plan_from_messages` only caches a
+  **read-only, guard-valid** turn (it re-checks every SQL through `sql_guard`);
+  `lookup` is cosine similarity with a conservative threshold (a miss → LLM).
+- **`plan_replay.py`** — on a hit the plan is **re-executed live**: SQL is
+  re-validated through `sql_guard` and run read-only, policy retrieval re-runs,
+  and the answer is composed **deterministically from the fresh results** (no
+  LLM). `ReplayError` (SQL no longer valid) makes the caller fall back to the
+  LLM. This is why a hit is fast *and* the number is always current.
+- **`cached_agent.py`** — `CachedAgent` wraps the compiled agent with the same
+  `invoke`/`ainvoke` interface (so the API/evals/tests are unchanged): lookup →
+  replay live on a hit; on a miss, call the LLM and warm the cache. Wrapped in
+  `build_agent` when `plan_cache_enabled`. Multi-turn requests aren't cached.
+- **`data/seed_plan_cache.py`** — optional one-time warm-up: asks a few example
+  questions through the live agent so the demo's first click is instant (the
+  seeded plans are LLM-authored and guard-valid, then replayed live).
+
 ### API (Phase 4 — implemented)
 
 `src/api/` is a FastAPI service wrapping `build_agent`.

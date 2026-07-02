@@ -5,6 +5,70 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-009 — Semantic plan-cache: cache the *plan*, never the answer
+
+**Status:** Accepted · 2026-07-02
+
+### Context
+
+Phase 6 turns the "shipped link" into a **zero-key click-and-try** demo on a free
+CPU tier: no install, no API key for the visitor. On that tier the LLM is the
+slow, expensive part of every turn, and demo visitors ask overlapping questions
+(top overdue, DSO, aging). A cache is the obvious win — but the naive cache is a
+**correctness trap**: caching a question → *answer* freezes a number over mutable
+data. Regenerate the ledger with more customers, or test a new scenario, and a
+cached answer silently lies. In a portfolio piece, a confidently-wrong number is
+worse than a slow one.
+
+### Decision
+
+Cache the question → **plan**, not the question → **answer**, and always
+**re-execute the plan live**.
+
+1. **A plan is the agent's tool calls** — the guard-validated `query_ledger` SQL
+   and the `search_policy` query text (*intent*, `src/agent/plan_cache.py`). It
+   carries **no answer text and no numbers**. Only a **read-only, guard-valid**
+   turn is cacheable: `plan_from_messages` re-checks every `query_ledger` SQL
+   through `sql_guard` before storing, and refuses to cache a turn with no
+   groundable tool call.
+2. **A hit is replayed live** (`src/agent/plan_replay.py`): each cached step is
+   **re-validated through `sql_guard` and executed read-only** (SQL) / re-run
+   against the live index (policy), then the answer is **composed
+   deterministically from the fresh results** — the LLM is never called. So the
+   number always reflects the *current* data; only the *reasoning /
+   tool-selection* is skipped. If a cached query no longer validates or runs
+   (`ReplayError`), the caller falls through to the LLM.
+3. **Semantic lookup reuses the existing RAG stack** — the same ChromaDB client
+   and local MiniLM embeddings as the policy index (ADR-005), so this adds **no
+   new dependency**. Cosine similarity with a **conservative threshold** (default
+   0.90); a miss simply calls the LLM and warms the cache. Precision over recall:
+   "check this account" never matches "send this account" — and even a wrong
+   match is harmless, because every replayed plan is re-validated and read-only.
+4. **Drop-in wrapper.** `CachedAgent` presents the same `invoke`/`ainvoke`
+   interface as the compiled agent, so the API, evals and tests are unchanged;
+   `build_agent` wraps the agent when `plan_cache_enabled` (config-gated).
+   Multi-turn requests (a follow-up needs prior context) are not cache-eligible.
+
+This is caching the **reasoning / structured intent**, not output caching (cf.
+the semantic-cache literature).
+
+### Consequences
+
+- **Fast *and* honest:** a hit is ~tens of ms (no LLM), yet the number is always
+  live — proven offline by mutating the ledger and re-running the same cached
+  plan (`tests/test_plan_cache.py`), no model required.
+- The whole mechanism is unit-testable **offline** (deterministic embeddings +
+  an in-memory DuckDB), which is why Layer 1 was built entirely on the CPU-only
+  desktop; only seeding real example plans and the strong-vs-tiny model numbers
+  need a live provider (the notebook).
+- Reuses the guardrail as the safety backstop on the replay path too — one
+  audited security surface, no second model.
+- Layers 2–3 of Phase 6 (a hardened tiny local LLM with grammar-constrained
+  tool-calls + a self-contained `Dockerfile.hf` / `space-deploy` branch) build on
+  this and are deferred to a live-network session.
+
+---
+
 ## ADR-008 — AI-native layer: shared-guardrail MCP server + property-based evals
 
 **Status:** Accepted · 2026-06-08

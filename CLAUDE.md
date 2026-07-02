@@ -26,7 +26,8 @@ patterns from scratch and contains no proprietary code or data.
 ## Where things live
 
 - `data/`            — synthetic data generator + the policy document for RAG
-- `src/agent/`       — LangGraph graph, tools (guarded SQL, policy search), providers
+- `src/agent/`       — LangGraph graph, tools (guarded SQL, policy search), providers,
+                       plan-cache (`plan_cache` / `plan_replay` / `cached_agent`, ADR-009)
 - `src/rag/`         — ChromaDB indexer + embeddings
 - `src/api/`         — FastAPI app (lifespan, auth, routes)
 - `src/core/`        — config + Pydantic schemas

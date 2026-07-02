@@ -3,20 +3,29 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 implemented **and the ship gate is closed** (live GIF + README). MVP done.
+Phases 0–5 implemented, ship gate closed. **Phase 6 Layer 1 (semantic plan-cache)
+implemented on the desktop — 88 tests green.** MVP + the honesty-critical caching layer done.
 
-> **2026-07-02 — Phase 6 planned (public zero-key "click-and-try" demo).** Full design
-> in [`PLAN.md`](../PLAN.md) §"Phase 6". Turns the shipped link into a **click-and-try**
-> link on a **free** CPU tier, no key/install for the visitor. **NEXT SESSION STARTS AT
-> LAYER 1 — the semantic plan-cache — here on the desktop, no model needed.**
-> Load-bearing rule: **cache the question→PLAN (validated SQL), never the question→ANSWER**;
-> always re-execute the read-only SQL live so the number is correct even if the ledger
-> changes / a new scenario is tested. Reuses the existing ChromaDB + MiniLM embeddings;
-> every cached SQL is re-checked by `sql_guard` before running. Layers 2–3 (tiny local LLM
-> hardened with GBNF grammar-constrained tool-calls + KV cache; self-contained `Dockerfile.hf`
-> + `space-deploy` branch reusing forge-pdm F6 mechanics) need the notebook. → ADR-009.
-> Still-pending real numbers (`evals.run` pass-rate + one latency) fold into Layer 4.
-> Demo provider so far was local Ollama `qwen2.5:7b`.
+> **2026-07-02 — Phase 6 LAYER 1 DONE (semantic plan-cache, ADR-009).** Built entirely
+> here on the CPU-only desktop, no model needed. Cache the question→**PLAN** (the agent's
+> guard-validated tool calls), **never** the answer; on a hit the plan is **re-executed
+> live** (SQL re-validated through `sql_guard` + read-only, policy re-retrieved) and the
+> answer composed deterministically from **fresh** results → the LLM is skipped but the
+> number is always current. Proven offline by mutating an in-memory ledger and re-running
+> the same cached plan (freshness test). New: `src/agent/plan_cache.py` · `plan_replay.py`
+> · `cached_agent.py` (drop-in `CachedAgent` wrapping `build_agent`, config-gated by
+> `plan_cache_enabled`) · `data/seed_plan_cache.py` (optional warm-up) · `tests/test_plan_cache.py`
+> (12 tests). Reuses the existing ChromaDB + MiniLM embeddings — no new dependency.
+> **Gotcha:** ChromaDB's in-process store can share state across ephemeral clients, so the
+> test fixture uses a unique collection name per test (a fixed name bled between tests).
+>
+> **NEXT (needs the notebook — model + normal network):** Layers 2–3 — hardened tiny local
+> LLM (`qwen2.5:0.5b/1.5b` Q4_K_M) with **GBNF grammar-constrained tool-calls** + KV cache;
+> self-contained `Dockerfile.hf` + `space-deploy` branch reusing forge-pdm F6 mechanics.
+> Layer 4 — README live link + the two still-pending numbers (`evals.run` pass-rate + one
+> latency), ideally tiny-vs-strong model to show the delta. Also on the notebook: run
+> `python -m data.seed_plan_cache` (needs a provider) to pre-warm the demo cache, and
+> `python -m evals.run`. Demo provider so far was local Ollama `qwen2.5:7b`.
 
 > **2026-06-10 — deferred again, on purpose (handoff).** Confirmed these two numbers
 > (eval pass-rate + one latency) are recorded **nowhere** yet — they need a live run.
@@ -30,6 +39,28 @@ Phases 0–5 implemented **and the ship gate is closed** (live GIF + README). MV
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
 ## Done
+- 2026-07-02: **Phase 6 — Layer 1: semantic plan-cache (ADR-009).**
+  - `src/agent/plan_cache.py`: a *plan* = the agent's tool calls (validated
+    `query_ledger` SQL + `search_policy` query), stored in a ChromaDB collection
+    keyed by the question embedding (same MiniLM embeddings as RAG, no new dep).
+    `plan_from_messages` only caches read-only, guard-valid turns (re-checks SQL
+    via `sql_guard`); `PlanCache.lookup` = cosine similarity, conservative
+    threshold (default 0.90).
+  - `src/agent/plan_replay.py`: on a hit, re-validate + read-only re-execute the
+    SQL (and re-run policy retrieval), compose the answer **deterministically
+    from fresh results** — LLM untouched. `ReplayError` → caller falls back to
+    the LLM.
+  - `src/agent/cached_agent.py`: `CachedAgent`, a drop-in `invoke`/`ainvoke`
+    wrapper; `build_agent` wraps the compiled agent when `plan_cache_enabled`.
+    Multi-turn requests bypass the cache.
+  - `data/seed_plan_cache.py`: optional one-time warm-up via the live agent.
+  - Config: `plan_cache_enabled` / `plan_cache_collection` / `plan_cache_threshold`.
+  - `tests/test_plan_cache.py`: 12 offline tests — plan extraction (grounded /
+    ungrounded / unsafe-SQL / dedupe), semantic hit-vs-miss, **live-replay
+    freshness** (mutate the ledger → the replayed number moves), guard
+    re-validation on replay, and `CachedAgent` (miss→LLM+warm, hit→replay
+    without the LLM, multi-turn bypass). Full suite: **88 passing**.
+  - ADR-009 written; ARCHITECTURE + PLAN (Phase 6) + CLAUDE.md updated.
 - 2026-06-08: **Ship gate closed — live demo GIF.**
   - First end-to-end live run, on the personal Linux notebook (normal network):
     agent answered real questions using `query_ledger` (and `search_policy`),

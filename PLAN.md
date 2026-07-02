@@ -74,7 +74,7 @@ Cache the question→**plan** (which tool + the validated SQL + which policy chu
 *reasoning* is skipped. (This is "caching the reasoning / structured intent", not output
 caching — see the semantic-cache research; validated by SemanticALLI / Chillara 2026.)
 
-**Layer 1 — Semantic plan-cache  ⬅ START HERE (desktop, no model needed).**
+**Layer 1 — Semantic plan-cache  ✅ (desktop, no model needed — ADR-009).**
 - Example questions pre-populate the cache with **plans** (guard-validated SQL), not answers.
 - Every execution is **live + read-only** → number always correct, robust to mutable data.
 - Novel user questions: embed → cosine-similarity lookup → **hit** reuses the plan (re-run

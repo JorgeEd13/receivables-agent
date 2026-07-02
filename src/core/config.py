@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     # How many policy chunks `search_policy` returns.
     search_k: int = Field(default=4, ge=1, le=20)
 
+    # --- Semantic plan-cache (Phase 6, ADR-009) ---
+    # Skip the LLM for a semantically-similar past question by re-running its
+    # cached *plan* (validated tool calls) live. Caches reasoning, never answers.
+    plan_cache_enabled: bool = True
+    plan_cache_collection: str = "plan_cache"
+    # Cosine similarity a question must reach to reuse a cached plan. High by
+    # design: a miss simply falls through to the LLM, so precision beats recall.
+    plan_cache_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
+
     # --- API auth (used from Phase 4) ---
     app_api_key: str = "change-me"
 

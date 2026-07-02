@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-76%20passing-brightgreen" alt="76 tests">
+  <img src="https://img.shields.io/badge/tests-88%20passing-brightgreen" alt="88 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
@@ -28,11 +28,11 @@ text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
 > **Status: working MVP.** The agent, the guarded SQL + RAG tools, the FastAPI
-> service, the React UI, the one-command Docker run and the AI-native layer (MCP
-> server + eval suite) are all implemented and tested (Phases 0–5, 76 tests). A
-> public, clean-room portfolio project on 100% synthetic data. See
-> [`PLAN.md`](PLAN.md) for the roadmap and [`docs/STATE.md`](docs/STATE.md) for
-> current progress.
+> service, the React UI, the one-command Docker run, the AI-native layer (MCP
+> server + eval suite) and a **semantic plan-cache** are all implemented and
+> tested (Phases 0–5 + Phase 6 Layer 1, 88 tests). A public, clean-room portfolio
+> project on 100% synthetic data. See [`PLAN.md`](PLAN.md) for the roadmap and
+> [`docs/STATE.md`](docs/STATE.md) for current progress.
 
 ![receivables-agent demo](docs/demo.gif)
 
@@ -180,7 +180,7 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG indexer, API, MCP, and evals (76 tests)
+pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache (88 tests)
 ```
 
 ## AI-native layer
@@ -200,6 +200,27 @@ tools* — the surface AI-native teams care about:
 - **Claude Code skill** ([`.claude/skills/eval-agent/`](.claude/skills/eval-agent/))
   + [`CLAUDE.md`](CLAUDE.md) — the conventions and the eval-runner skill that let
   an AI collaborator work in this repo productively.
+
+## Semantic plan-cache (cache the *plan*, never the answer)
+
+On a small/free model the LLM is the slow part of a turn, and demo visitors ask
+overlapping questions. A naive answer-cache would be *fast but wrong*: a frozen
+number lies the moment the ledger changes. So this caches the question →
+**plan** — the agent's guard-validated tool calls (which SQL, which policy
+lookup) — and **re-executes it live** on every hit:
+
+- A semantically similar question **hits** the cache (cosine similarity over the
+  same local MiniLM embeddings the RAG index uses — no new dependency).
+- On a hit the cached SQL is **re-validated through the guardrail and run
+  read-only again**, so the number always reflects the *current* data; only the
+  LLM's reasoning is skipped. Regenerate the ledger and the answer updates.
+- Only **read-only, guard-valid** plans are ever cached; a conservative
+  similarity threshold means a miss simply falls through to the LLM.
+
+It's caching the *reasoning*, not the output — a fast path that can't go stale.
+See [ADR-009](docs/DECISIONS.md) and
+[`tests/test_plan_cache.py`](tests/test_plan_cache.py) (the freshness test mutates
+the ledger and proves the replayed number moves).
 
 ## How this was built
 

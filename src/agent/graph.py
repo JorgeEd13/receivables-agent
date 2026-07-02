@@ -11,14 +11,18 @@ fallback flow through every model call in the loop.
 
 from __future__ import annotations
 
+import chromadb
 import duckdb
 from langgraph.prebuilt import create_react_agent
 
+from src.agent.cached_agent import CachedAgent
+from src.agent.plan_cache import get_plan_cache
 from src.agent.providers import build_chat_model, has_credentials
 from src.agent.schema_hints import SCHEMA_HINTS
 from src.agent.tools import make_query_ledger_tool, make_search_policy_tool
 from src.core.config import Settings, get_settings
 from src.agent.ledger import connect_readonly
+from src.rag.embeddings import default_embedding_function
 from src.rag.index import ensure_policy_index
 
 SYSTEM_PROMPT = f"""\
@@ -87,4 +91,27 @@ def build_agent(
         make_search_policy_tool(policy, settings.search_k),
     ]
     model = build_dynamic_model(settings, tools)
-    return create_react_agent(model, tools=tools, prompt=SYSTEM_PROMPT)
+    agent = create_react_agent(model, tools=tools, prompt=SYSTEM_PROMPT)
+
+    if not settings.plan_cache_enabled:
+        return agent
+
+    # Wrap with the semantic plan-cache (ADR-009): reuse the same ChromaDB
+    # client + local MiniLM embeddings as the policy index — no new dependency —
+    # and hand the cache the same read-only connection + policy collection so a
+    # hit is replayed *live* (never a frozen answer).
+    client = chromadb.PersistentClient(path=settings.chroma_path)
+    cache = get_plan_cache(
+        client,
+        settings.plan_cache_collection,
+        default_embedding_function(),
+        similarity_threshold=settings.plan_cache_threshold,
+    )
+    return CachedAgent(
+        agent,
+        cache,
+        con,
+        policy,
+        max_rows=settings.max_rows,
+        search_k=settings.search_k,
+    )
