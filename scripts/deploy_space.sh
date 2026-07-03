@@ -34,23 +34,28 @@ fi
 
 git checkout "${BRANCH}"
 
-if [ "$#" -gt 0 ]; then
+# main and space-deploy have INTENTIONALLY unrelated histories (space-deploy carries the
+# HF front-matter README + the tiny-Ollama image as the literal Dockerfile), AND
+# space-deploy's history was rewritten by `git lfs migrate`. So neither `BRANCH..main`
+# nor patch-id (`git cherry`) reliably auto-detects "new" commits — both try to re-apply
+# the initial scaffold and explode into add/add conflicts. Deploy is therefore EXPLICIT:
+# pass the exact main commit SHAs to forward (or `--last N` for the last N on main).
+if [ "$#" -eq 0 ]; then
+  echo "usage: bash scripts/deploy_space.sh <commit-ish>...   # exact main commits to forward" >&2
+  echo "       bash scripts/deploy_space.sh --last N          # the last N commits on main" >&2
+  echo "(auto-detect is intentionally NOT supported — the branches have unrelated, LFS-rewritten histories)" >&2
+  git checkout "${start_branch}" >/dev/null 2>&1 || true
+  exit 2
+fi
+
+if [ "$1" = "--last" ]; then
+  n="${2:?--last needs a count}"
+  mapfile -t picks < <(git rev-list --reverse --no-merges -n "${n}" main)
+  echo "[deploy] forwarding the last ${n} commit(s) on main: ${picks[*]}"
+  git cherry-pick "${picks[@]}"
+else
   echo "[deploy] cherry-picking: $*"
   git cherry-pick "$@"
-else
-  # main and space-deploy have INTENTIONALLY unrelated histories (space-deploy carries
-  # the HF front-matter README + the tiny-Ollama image as the literal Dockerfile), so
-  # `BRANCH..main` lists ALL of main and explodes into add/add conflicts. Use `git
-  # cherry`, which compares by PATCH content (works across unrelated histories): a
-  # leading `+` marks a main commit whose change isn't yet on space-deploy.
-  echo "[deploy] forwarding main commits not yet applied to ${BRANCH} (by patch id)…"
-  mapfile -t picks < <(git cherry "${BRANCH}" main | awk '/^\+/ {print $2}')
-  if [ "${#picks[@]}" -eq 0 ]; then
-    echo "[deploy] nothing new to forward."
-  else
-    echo "[deploy] picking ${#picks[@]} commit(s)."
-    git cherry-pick "${picks[@]}"
-  fi
 fi
 
 # HF ignores the front-matter dockerfile_path and builds the literal `Dockerfile`,
