@@ -38,12 +38,17 @@ if [ "$#" -gt 0 ]; then
   echo "[deploy] cherry-picking: $*"
   git cherry-pick "$@"
 else
-  echo "[deploy] cherry-picking every commit on main not yet on ${BRANCH}…"
-  # --no-merges: linear history only; cherry-pick can't apply merge commits blindly.
-  mapfile -t picks < <(git rev-list --reverse --no-merges "${BRANCH}..main")
+  # main and space-deploy have INTENTIONALLY unrelated histories (space-deploy carries
+  # the HF front-matter README + the tiny-Ollama image as the literal Dockerfile), so
+  # `BRANCH..main` lists ALL of main and explodes into add/add conflicts. Use `git
+  # cherry`, which compares by PATCH content (works across unrelated histories): a
+  # leading `+` marks a main commit whose change isn't yet on space-deploy.
+  echo "[deploy] forwarding main commits not yet applied to ${BRANCH} (by patch id)…"
+  mapfile -t picks < <(git cherry "${BRANCH}" main | awk '/^\+/ {print $2}')
   if [ "${#picks[@]}" -eq 0 ]; then
     echo "[deploy] nothing new to forward."
   else
+    echo "[deploy] picking ${#picks[@]} commit(s)."
     git cherry-pick "${picks[@]}"
   fi
 fi
