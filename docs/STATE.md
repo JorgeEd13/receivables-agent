@@ -4,11 +4,29 @@
 
 ## Current focus
 Phases 0–5 done. Phase 6 L1 (plan-cache) + L2 (grammar-constrained, ADR-011) +
-7.1 (hardware-aware, ADR-010) done. Suite **110 green**. **Phase 6 LAYER 3 built +
-smoke-tested on the DESKTOP (ADR-012): self-contained tiny-Ollama `Dockerfile.hf`
-+ `hf_entrypoint.sh` + `deploy_space.sh` + `docs/DEPLOY.md`.** NEXT: push the
-`space-deploy` branch to the HF Space (reachable from this desktop) + README live
-link; then Layer 4 tiny-vs-**strong** number (needs the notebook GPU).
+7.1 (hardware-aware, ADR-010) done. Suite **110 green**. **Phase 6 LAYER 3 SHIPPED
++ LIVE (ADR-012): the self-contained tiny-Ollama Space is deployed and answering.**
+🚀 **https://jorgeed-receivables-agent.hf.space** — `/api/health` ok, a seeded
+question replays in ~3 s via the plan-cache (real `query_ledger`, 13,000 customers).
+Built, smoke-tested, AND deployed from the DESKTOP (Docker + git push to HF both work
+here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number** on the
+notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
+better model" delta); everything else for the live link is done.
+
+> **2026-07-03 — Phase 6 LAYER 3 LIVE.** Space deployed via a `space-deploy` branch
+> (HF front-matter README + tiny-Ollama image as the literal `Dockerfile` + `.gitattributes`
+> LFS-tracking `*.png`/`*.gif` — HF rejects plain-git binaries). HF builds `Dockerfile.hf`
+> on its clean runners (the corp-CA build step no-ops there) and it serves. **Demo-UX bugs
+> caught by real browser testing (both fixed):** (a) the UI's *first suggested* question was
+> NOT in the plan-cache seed set → clicking it fell through to the slow tiny model and hung
+> on "Thinking…" — fixed by making `web/src/App.jsx` SUGGESTIONS mirror `data/seed_plan_cache.py`
+> exactly (every chip is now a ~3 s cache hit); (b) added an honest latency hint (chips =
+> instant/cached, typed = live tiny model, may take up to a minute) so "Thinking…" never
+> reads as hung. **Deploy gotchas (ACHADOS candidates, portable to the other Spaces):** git &
+> the Docker daemon trust the corp CA (push/pull work) even though `curl`/schannel fails
+> revocation; HF binaries need LFS; `git lfs migrate` rewrites shared history → keep it OFF
+> `main` (had to hard-reset local `main` to the clean `origin/main` after a leak; origin was
+> never polluted).
 
 > **2026-07-03 — Phase 6 LAYER 3 DONE on the DESKTOP (self-contained tiny-Ollama HF
 > image, ADR-012).** Decision: the public Space runs a **tiny Ollama model baked into

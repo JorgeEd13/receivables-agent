@@ -7,11 +7,22 @@
 <p align="center"><em>Ask your receivables ledger a plain-language question — get the prioritized accounts <strong>and</strong> the governing policy, cited.</em></p>
 
 <p align="center">
+  <a href="https://jorgeed-receivables-agent.hf.space"><img src="https://img.shields.io/badge/live%20demo-try%20it-brightgreen?logo=huggingface&logoColor=white" alt="Live demo — try it"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-88%20passing-brightgreen" alt="88 tests">
+  <img src="https://img.shields.io/badge/tests-110%20passing-brightgreen" alt="110 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <strong>🚀 Try it live:</strong>
+  <a href="https://jorgeed-receivables-agent.hf.space">jorgeed-receivables-agent.hf.space</a>
+  — a self-contained Hugging Face Space running a <strong>tiny local model</strong>
+  (no API key, 100% synthetic data). The one-click example questions answer
+  instantly (cached plans, re-run live); a typed question runs the tiny model on a
+  free CPU, so it's slower — that's the <em>"shines with a better model"</em> story,
+  by design.
 </p>
 
 **Collections teams burn hours on two questions every day: _who do we chase
