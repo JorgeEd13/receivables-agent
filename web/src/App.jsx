@@ -18,17 +18,22 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // Whether the in-flight question is a one-click suggestion. Suggestions are
+  // plan-cache hits (fast, ~3s); a typed question runs the live tiny model on a
+  // free CPU and can take a while — the "Thinking…" copy reflects that.
+  const [cachedAsk, setCachedAsk] = useState(false);
   const scrollRef = useRef(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
   }, [messages, busy]);
 
-  async function ask(text) {
+  async function ask(text, fromSuggestion = false) {
     const question = text.trim();
     if (!question || busy) return;
     setError(null);
     setInput("");
+    setCachedAsk(fromSuggestion || SUGGESTIONS.includes(question));
 
     // History sent to the API is the prior conversation (content only).
     const history = messages.map(({ role, content }) => ({ role, content }));
@@ -62,10 +67,14 @@ export default function App() {
         {messages.length === 0 && (
           <div className="suggestions">
             {SUGGESTIONS.map((s) => (
-              <button key={s} className="chip" onClick={() => ask(s)}>
+              <button key={s} className="chip" onClick={() => ask(s, true)}>
                 {s}
               </button>
             ))}
+            <p className="suggestions-hint">
+              These answer instantly (pre-cached plans, re-run live). Typing your
+              own runs a tiny model on a free CPU — it works, just give it a moment.
+            </p>
           </div>
         )}
 
@@ -84,7 +93,13 @@ export default function App() {
           </div>
         ))}
 
-        {busy && <div className="bubble assistant thinking">Thinking…</div>}
+        {busy && (
+          <div className="bubble assistant thinking">
+            {cachedAsk
+              ? "Thinking…"
+              : "Thinking… (a typed question runs the tiny model on a free CPU — this can take up to a minute)"}
+          </div>
+        )}
         {error && <div className="error">{error}</div>}
       </div>
 

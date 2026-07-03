@@ -58,6 +58,14 @@ body {
   margin: auto 0;
 }
 
+.suggestions-hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: #8a94a6;
+  text-align: center;
+}
+
 .chip {
   background: var(--assistant);
   color: var(--text);
