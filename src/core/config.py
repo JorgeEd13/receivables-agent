@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     constrained_tool_calls: Literal["auto", "on", "off"] = "auto"
     constrained_quality_max: int = Field(default=3, ge=1, le=10)
 
+    # Max ReAct steps before the agent gives up. Low by design: a tiny model that
+    # loops (query → policy → query …) should fail fast with a graceful message,
+    # not thrash for minutes. A well-behaved turn uses 1–2 tool calls (ADR-013).
+    agent_recursion_limit: int = Field(default=8, ge=2, le=50)
+
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.0-flash"
 

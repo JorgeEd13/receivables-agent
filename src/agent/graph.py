@@ -18,7 +18,7 @@ from langgraph.prebuilt import create_react_agent
 from src.agent.cached_agent import CachedAgent
 from src.agent.plan_cache import get_plan_cache
 from src.agent.providers import build_chat_model, has_credentials
-from src.agent.schema_hints import SCHEMA_HINTS
+from src.agent.schema_hints import SCHEMA_HINTS, SCHEMA_HINTS_BRIEF
 from src.agent.tools import make_query_ledger_tool, make_search_policy_tool
 from src.core.config import Settings, get_settings
 from src.agent.ledger import connect_readonly
@@ -50,6 +50,42 @@ Rules:
   (e.g. what "overdue" threshold).
 
 {SCHEMA_HINTS}"""
+
+
+# Compact, directive prompt for the tiny local model (ADR-013). A small model on a
+# free CPU is both slow and easily distracted by a long prompt — and it tends to
+# over-call `search_policy` (calling it on a plain "top N customers" question, which
+# needs no policy, then looping). This prompt is short and gives ONE firm routing
+# rule so the common data question is a single ledger call.
+SYSTEM_PROMPT_BRIEF = f"""\
+You answer questions about a receivables ledger. Two tools:
+- `query_ledger` — read-only SQL for any number/name/fact (who owes what, aging, DSO, totals).
+- `search_policy` — the written collections policy (rules/thresholds/process).
+
+Routing (follow exactly):
+- Default to `query_ledger`. Any "who/which/how many/how much/top N/total/amount/list"
+  question is answered by ONE `query_ledger` call — do NOT call `search_policy` for it.
+- Call `search_policy` ONLY when the question explicitly asks about a rule, policy,
+  threshold or process ("what's the rule", "what does our policy say", "when is …
+  eligible", "at how many days …").
+- After you have the tool result, give the final answer. Do not keep calling tools.
+
+{SCHEMA_HINTS_BRIEF}"""
+
+
+def select_prompt(settings: Settings) -> str:
+    """The system prompt for the active primary provider.
+
+    The tiny local tier (grammar-constrained, ADR-011) gets the compact, firm-routing
+    prompt (ADR-013); strong/cloud models get the full prompt.
+    """
+    if settings.primary_provider == "ollama":
+        from src.agent.providers import resolve_ollama_model, should_constrain
+
+        model_name = resolve_ollama_model(settings)
+        if should_constrain(model_name, settings):
+            return SYSTEM_PROMPT_BRIEF
+    return SYSTEM_PROMPT
 
 
 def build_dynamic_model(settings: Settings, tools: list):
@@ -91,7 +127,7 @@ def build_agent(
         make_search_policy_tool(policy, settings.search_k),
     ]
     model = build_dynamic_model(settings, tools)
-    agent = create_react_agent(model, tools=tools, prompt=SYSTEM_PROMPT)
+    agent = create_react_agent(model, tools=tools, prompt=select_prompt(settings))
 
     if not settings.plan_cache_enabled:
         return agent
@@ -114,4 +150,5 @@ def build_agent(
         policy,
         max_rows=settings.max_rows,
         search_k=settings.search_k,
+        recursion_limit=settings.agent_recursion_limit,
     )

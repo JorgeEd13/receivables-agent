@@ -171,7 +171,7 @@ class _RecordingAgent:
     def __init__(self) -> None:
         self.calls = 0
 
-    def invoke(self, payload: dict) -> dict:
+    def invoke(self, payload: dict, config: dict | None = None) -> dict:
         self.calls += 1
         messages = payload["messages"] + [
             _tool_turn("query_ledger", {"sql": "SELECT count(*) AS n FROM customers"}),
@@ -267,3 +267,56 @@ def test_curated_questions_match_ui_suggestions() -> None:
     assert suggestions, "no SUGGESTIONS found in App.jsx"
     missing = [s for s in suggestions if s not in CURATED_PLANS]
     assert not missing, f"UI suggestions not in curated cache: {missing}"
+
+
+# --- tiny-model prompt + graceful recursion (ADR-013) ------------------- #
+
+
+def test_select_prompt_uses_brief_for_constrained_tiny_model(monkeypatch) -> None:
+    """A constrained tiny model gets the compact routing prompt; a strong/cloud
+    model gets the full one."""
+    from src.agent import graph
+    from src.core.config import Settings
+
+    monkeypatch.setattr(graph, "resolve_ollama_model", lambda s: "qwen2.5:1.5b", raising=False)
+    # Patch the providers.should_constrain that select_prompt imports.
+    import src.agent.providers as providers
+    monkeypatch.setattr(providers, "should_constrain", lambda name, s: True)
+    monkeypatch.setattr(providers, "resolve_ollama_model", lambda s: "qwen2.5:1.5b")
+
+    tiny = Settings(primary_provider="ollama")
+    assert graph.select_prompt(tiny) == graph.SYSTEM_PROMPT_BRIEF
+
+    monkeypatch.setattr(providers, "should_constrain", lambda name, s: False)
+    strong = Settings(primary_provider="ollama")
+    assert graph.select_prompt(strong) == graph.SYSTEM_PROMPT
+
+    cloud = Settings(primary_provider="gemini")
+    assert graph.select_prompt(cloud) == graph.SYSTEM_PROMPT
+
+
+def test_astream_handles_recursion_limit_gracefully(cache, con) -> None:
+    """A looping agent (GraphRecursionError) yields a friendly answer event, not a
+    broken stream or a bare error."""
+    import asyncio
+
+    from langgraph.errors import GraphRecursionError
+
+    class _LoopingAgent:
+        async def astream_events(self, payload, version, config=None):
+            yield {"event": "on_tool_start", "name": "query_ledger"}
+            raise GraphRecursionError("recursion limit reached")
+
+    agent = CachedAgent(
+        _LoopingAgent(), cache, con, policy=None, max_rows=100, search_k=1, recursion_limit=8
+    )
+
+    async def _collect():
+        return [ev async for ev in agent.astream({"messages": [{"role": "user", "content": "loop me"}]})]
+
+    events = asyncio.run(_collect())
+    assert {"type": "tool", "name": "query_ledger"} in events
+    answer = events[-1]
+    assert answer["type"] == "answer"
+    assert "couldn't finish" in answer["reply"].lower()
+    assert answer["tools_used"] == ["query_ledger"]

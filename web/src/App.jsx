@@ -147,6 +147,25 @@ export default function App() {
         {error && <div className="error">{error}</div>}
       </div>
 
+      {/* Persistent one-click bar: the instant (cached) questions stay reachable
+          after the first answer, not just on an empty chat. */}
+      {messages.length > 0 && (
+        <div className="quick-bar" aria-label="Instant example questions">
+          <span className="quick-label">Instant:</span>
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s}
+              className="quick-chip"
+              disabled={busy}
+              title={s}
+              onClick={() => ask(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
       <form
         className="composer"
         onSubmit={(e) => {

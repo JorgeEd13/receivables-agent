@@ -36,3 +36,15 @@ BASE TABLES:
 Amounts are USD. You may only SELECT; the tool rejects writes, multiple
 statements, unknown tables, and caps the row count automatically.
 """
+
+
+# A compact schema for the tiny-model path: view + column names only, no prose.
+# Fewer tokens per turn = a faster and less-distracted small model (ADR-013).
+SCHEMA_HINTS_BRIEF = """\
+DuckDB read-only. SELECT only. Use `meta.as_of_date` for "now"/"overdue". Prefer views:
+- v_customer_ar(customer_id, name, segment, profile, credit_limit, open_invoices,
+    outstanding_amount, overdue_amount, max_days_overdue)  -- one row per customer
+- v_invoices(invoice_id, customer_id, issue_date, due_date, amount, status, days_overdue,
+    aging_bucket)  -- status: paid|open|overdue; aging_bucket: current|1-30|31-60|61-90|90+
+- v_dso(period_days, receivables, credit_sales, dso_days)  -- single row
+Amounts USD."""

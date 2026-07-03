@@ -5,6 +5,52 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-013 — Tiny-model prompt, firm tool-routing, and a low recursion cap
+
+**Status:** Accepted · 2026-07-03
+
+### Context
+
+Live testing of the free-CPU Space surfaced three failure modes on **novel typed
+questions** (the seeded ones are instant + correct from the baked cache, ADR-012):
+
+- A plain data question ("which 5 customers have the most overdue money?") made the
+  tiny model call **both** tools — `query_ledger` **and** `search_policy` — when the
+  policy is irrelevant, then loop.
+- With the default LangGraph recursion limit (25), a looping tiny model **thrashed for
+  200–250 s** and then returned no final answer ("The agent did not return an answer").
+- Every ReAct turn fed the model the **full ~729-token system prompt** (written for a
+  strong model) + a 386-token schema block — slow on a 2-vCPU CPU.
+
+### Decision
+
+Tier-specific prompt + a hard step cap:
+
+- **Compact tiny-model prompt** (`graph.SYSTEM_PROMPT_BRIEF` + `schema_hints.SCHEMA_HINTS_BRIEF`),
+  selected by `graph.select_prompt` when the primary is the constrained tiny tier
+  (`providers.should_constrain`); strong/cloud models keep the full prompt. **57 % shorter**
+  (729 → 310 tokens), so every turn is cheaper.
+- **One firm routing rule** in that prompt: *default to `query_ledger`; call `search_policy`
+  ONLY when the question explicitly asks about a rule/policy/threshold; then answer — stop
+  calling tools.* Small models follow a single terse imperative better than examples.
+- **`agent_recursion_limit` (default 8)** passed as `config={"recursion_limit": …}` to every
+  agent call. A well-behaved turn is 1–2 tool calls, so 8 lets the loop breathe but fails an
+  unproductive loop in seconds, not minutes. `CachedAgent.astream` catches
+  `GraphRecursionError` and yields a **graceful answer** ("couldn't finish on the free-tier
+  tiny model — try an example or rephrase"), never a broken stream or a bare error.
+
+### Consequences
+
+- Novel questions are faster (shorter prompt) and route correctly more often (the rule),
+  and a genuine loop degrades gracefully instead of thrashing.
+- **Does not** make a 1.5B as capable as a strong model on free-text — some paraphrases will
+  still mis-route or give weak SQL. That remains the "shines with a better model" story
+  (ADR-011); the baked curated cache (ADR-012) covers the showcased questions with certainty.
+- Strong/cloud models are unaffected (full prompt, native tool-calling, same high cap in
+  practice since they rarely loop).
+
+---
+
 ## ADR-012 — Self-contained tiny-Ollama Hugging Face Space (`Dockerfile.hf`)
 
 **Status:** Accepted · 2026-07-03

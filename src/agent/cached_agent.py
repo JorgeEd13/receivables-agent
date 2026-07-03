@@ -81,6 +81,7 @@ class CachedAgent:
         *,
         max_rows: int,
         search_k: int,
+        recursion_limit: int = 8,
     ) -> None:
         self._agent = agent
         self._cache = cache
@@ -88,6 +89,8 @@ class CachedAgent:
         self._policy = policy
         self._max_rows = max_rows
         self._search_k = search_k
+        # Cap ReAct steps so a looping tiny model fails fast (ADR-013).
+        self._config = {"recursion_limit": recursion_limit}
 
     # --- the interface the app/evals call -------------------------------- #
 
@@ -96,7 +99,7 @@ class CachedAgent:
         hit = self._try_cache(messages)
         if hit is not None:
             return hit
-        result = self._agent.invoke(payload)
+        result = self._agent.invoke(payload, config=self._config)
         self._warm(messages, result["messages"])
         return result
 
@@ -105,7 +108,7 @@ class CachedAgent:
         hit = self._try_cache(messages)
         if hit is not None:
             return hit
-        result = await self._agent.ainvoke(payload)
+        result = await self._agent.ainvoke(payload, config=self._config)
         self._warm(messages, result["messages"])
         return result
 
@@ -130,10 +133,14 @@ class CachedAgent:
 
         # Miss: stream the real ReAct loop. `astream_events` surfaces a
         # `on_tool_start` per tool call; the final state carries the answer.
+        from langgraph.errors import GraphRecursionError
+
         final_messages: list[Any] | None = None
         seen: set[str] = set()
         try:
-            async for event in self._agent.astream_events(payload, version="v2"):
+            async for event in self._agent.astream_events(
+                payload, version="v2", config=self._config
+            ):
                 kind = event.get("event")
                 if kind == "on_tool_start":
                     name = event.get("name", "")
@@ -145,6 +152,19 @@ class CachedAgent:
                     output = data.get("output")
                     if isinstance(output, dict) and "messages" in output:
                         final_messages = output["messages"]
+        except GraphRecursionError:
+            # The tiny model looped without converging (over-calling tools). Fail
+            # gracefully with an honest, actionable answer instead of thrashing.
+            yield {
+                "type": "answer",
+                "reply": (
+                    "I couldn't finish this one on the free-tier tiny model — it went "
+                    "back and forth without settling on an answer. Try one of the "
+                    "example questions (they're instant), or rephrase this more simply."
+                ),
+                "tools_used": sorted(seen),
+            }
+            return
         except Exception as exc:  # keep the stream well-formed on any failure
             yield {"type": "error", "message": str(exc)}
             return

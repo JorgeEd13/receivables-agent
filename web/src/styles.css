@@ -66,6 +66,45 @@ body {
   text-align: center;
 }
 
+.quick-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.25rem 0;
+}
+
+.quick-label {
+  font-size: 0.72rem;
+  color: #8a94a6;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.quick-chip {
+  max-width: 15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--assistant);
+  color: var(--muted);
+  border: 1px solid #2b3340;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.quick-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.quick-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .chip {
   background: var(--assistant);
   color: var(--text);
