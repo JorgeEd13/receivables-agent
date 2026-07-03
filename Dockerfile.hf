@@ -128,8 +128,16 @@ ENV PRIMARY_PROVIDER=ollama \
 # HF Spaces runs the container as a non-root user with UID 1000. Give it a writable
 # home so `ollama serve` (~/.ollama models) and the ChromaDB index (data/chroma)
 # can be written at startup.
+#
+# Also COPY the ONNX MiniLM embedding model the build already downloaded (as root,
+# to /root/.cache) into appuser's cache. Without this the runtime user re-downloads
+# it on first embed — and on the HF Space that re-download produced a TRUNCATED file
+# (`INVALID_PROTOBUF` at startup). Baking the known-good model means runtime never
+# fetches it: faster cold start AND no corrupt-download failure.
 RUN useradd -m -u 1000 appuser \
-    && chown -R appuser:appuser /app \
+    && mkdir -p /home/appuser/.cache \
+    && cp -r /root/.cache/chroma /home/appuser/.cache/chroma \
+    && chown -R appuser:appuser /app /home/appuser/.cache \
     && chmod +x scripts/hf_entrypoint.sh
 ENV HOME=/home/appuser
 
