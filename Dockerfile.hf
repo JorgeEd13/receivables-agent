@@ -1,0 +1,137 @@
+# syntax=docker/dockerfile:1
+
+# Self-contained serving image for a Hugging Face Space (Phase 6, Layer 3).
+#
+# Unlike the F4 `Dockerfile` (Gemini-cloud, needs a GEMINI_API_KEY secret), this
+# image runs the demo on a **local tiny Ollama model baked into the container** —
+# zero secrets, zero cloud quota, always up. It is the "click here and try it"
+# link: a free URL that runs its *own* model. The tiny model is deliberately the
+# floor; the "shines with a better model" story (tiny-vs-strong numbers) is added
+# later from a GPU box (ADR-012).
+#
+# HF Spaces contract honoured: a Docker Space, a non-root user (UID 1000), and the
+# app listens on `app_port` from the Space README front-matter (8000; $PORT-aware).
+#
+# What runs WHERE:
+#   * build time — build the React UI, install deps + the Ollama binary, and bake
+#     the synthetic ledger (deterministic, ~45s). No model, no network-at-runtime
+#     work here.
+#   * startup (scripts/hf_entrypoint.sh) — `ollama serve`, pull the tiny model,
+#     start uvicorn immediately, and warm the plan-cache in the BACKGROUND (so
+#     /api/health and the UI are live at once). Done as the runtime user so the
+#     model store (~/.ollama) and the ChromaDB index (data/chroma) are writable.
+
+# --- Stage 1: build the React chat UI ---
+FROM node:20-slim AS web
+WORKDIR /web
+
+# Optional: trust a local corporate CA so `npm install` works behind a TLS-
+# inspecting proxy. The `corp-ca.cr[t]` glob makes the file OPTIONAL — it is
+# copied if present (local dev) and silently skipped on HF's clean runners (where
+# it doesn't exist and isn't needed). corp-ca.crt is git-ignored, never shipped.
+COPY corp-ca.cr[t] /usr/local/share/ca-certificates/corp-ca.crt
+RUN if [ -s /usr/local/share/ca-certificates/corp-ca.crt ]; then \
+      apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+      && update-ca-certificates \
+      && npm config set cafile /usr/local/share/ca-certificates/corp-ca.crt \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+COPY web/package.json web/package-lock.json* ./
+RUN npm install
+COPY web/ ./
+# Baked into the bundle so the same-origin UI authenticates to the API with no
+# login. It must match APP_API_KEY below. Both default to a demo value; override
+# with --build-arg VITE_API_KEY=<x> and a matching APP_API_KEY for a private demo.
+ARG VITE_API_KEY=demo-key
+ENV VITE_API_KEY=$VITE_API_KEY
+RUN npm run build
+
+# --- Stage 2: Python runtime serving the API + the built UI + a local model ---
+FROM python:3.11-slim AS app
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+# curl to fetch the Ollama install script + the model pull; ca-certificates so the
+# runtime pull over TLS works on the HF runner; zstd because the Ollama installer
+# ships a zstd-compressed archive and the slim base image has no extractor.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Optional: trust a local corporate CA so pip/curl/ollama-install AND the runtime
+# Python TLS calls (ChromaDB/huggingface_hub fetching the one-time ONNX embedding
+# model at startup) work behind a TLS-inspecting proxy. `corp-ca.cr[t]` is OPTIONAL
+# (glob) — present in local dev, absent (and unneeded) on HF's clean runners.
+# git-ignored, never shipped.
+#
+# Pointing pip at the standard system bundle (/etc/ssl/certs/ca-certificates.crt)
+# is a NO-OP on HF (that's already the default bundle there) and the fix locally,
+# because the conditional step below merges the corp CA INTO that same bundle.
+COPY corp-ca.cr[t] /usr/local/share/ca-certificates/corp-ca.crt
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+RUN if [ -s /usr/local/share/ca-certificates/corp-ca.crt ]; then \
+      update-ca-certificates \
+      && pip config set global.cert /etc/ssl/certs/ca-certificates.crt; \
+    fi
+
+# Install the Ollama server binary (the model itself is pulled at STARTUP, not
+# baked — keeps the image small and lets OLLAMA_MODEL=auto pick per the runtime box).
+RUN curl -fsSL https://ollama.com/install.sh | sh
+
+# Python deps: the local-provider set (no Gemini). Copy first so the layer caches.
+COPY requirements-hf.txt ./
+RUN pip install --no-cache-dir -r requirements-hf.txt
+
+COPY src/ ./src/
+COPY data/ ./data/
+COPY scripts/ ./scripts/
+COPY --from=web /web/dist ./web/dist
+
+# Bake the synthetic ledger at image-build time (deterministic, ~45s). The
+# .dockerignore excludes any local *.duckdb so the image always builds it fresh.
+RUN python data/generate.py
+
+# The Space PINS a known-good tiny model for a deterministic public demo, rather
+# than OLLAMA_MODEL=auto (which is the right choice for local dev across varied
+# hardware, but on a shared free tier we want a predictable footprint + latency).
+# qwen2.5:1.5b is tiny but tool-capable and grammar-constrained (ADR-011); the
+# plan-cache (ADR-009) carries the headline questions with curated-correct SQL.
+# Set OLLAMA_MODEL=auto to restore hardware-aware selection. No GEMINI key, no
+# cloud fallback — the container is the whole demo.
+ENV PRIMARY_PROVIDER=ollama \
+    FALLBACK_PROVIDER=ollama \
+    OLLAMA_MODEL=qwen2.5:1.5b \
+    OLLAMA_BASE_URL=http://localhost:11434 \
+    OLLAMA_KEEP_ALIVE=30m \
+    PLAN_CACHE_ENABLED=true \
+    APP_API_KEY=demo-key
+
+# Point the runtime Python TLS stack at the system CA bundle so the one-time ONNX
+# embedding-model download (ChromaDB/huggingface_hub, at startup) verifies behind a
+# TLS-inspecting proxy locally. A NO-OP on HF (that IS the default bundle there);
+# set AFTER pip so it can't invalidate the cached dependency layer.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+# HF Spaces runs the container as a non-root user with UID 1000. Give it a writable
+# home so `ollama serve` (~/.ollama models) and the ChromaDB index (data/chroma)
+# can be written at startup.
+RUN useradd -m -u 1000 appuser \
+    && chown -R appuser:appuser /app \
+    && chmod +x scripts/hf_entrypoint.sh
+ENV HOME=/home/appuser
+
+# Cache-bust: bump to force HF to rebuild the final layers instead of serving a
+# stale fully-cached image (HF caches aggressively; a CMD-only change was reused
+# from cache in the forge-pdm F6 deploy).
+ARG CACHE_BUST=1
+
+USER appuser
+
+# HF expects the app on `app_port` (8000). $PORT lets a Space/Cloud Run override it.
+EXPOSE 8000
+CMD ["bash", "scripts/hf_entrypoint.sh"]

@@ -3,11 +3,37 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 done. Phase 6 Layer 1 (plan-cache) + Phase 7.1 (hardware-aware
-selection, ADR-010) + **Phase 6 Layer 2 (grammar-constrained tool-calls, ADR-011)
-— all DONE on the notebook.** Suite **110 green**. **NEXT: Phase 6 Layer 3 —
-self-contained `Dockerfile.hf` + `space-deploy` branch (reuse forge-pdm F6), then
-Layer 4 (README live link + tiny-vs-strong numbers).**
+Phases 0–5 done. Phase 6 L1 (plan-cache) + L2 (grammar-constrained, ADR-011) +
+7.1 (hardware-aware, ADR-010) done. Suite **110 green**. **Phase 6 LAYER 3 built +
+smoke-tested on the DESKTOP (ADR-012): self-contained tiny-Ollama `Dockerfile.hf`
++ `hf_entrypoint.sh` + `deploy_space.sh` + `docs/DEPLOY.md`.** NEXT: push the
+`space-deploy` branch to the HF Space (reachable from this desktop) + README live
+link; then Layer 4 tiny-vs-**strong** number (needs the notebook GPU).
+
+> **2026-07-03 — Phase 6 LAYER 3 DONE on the DESKTOP (self-contained tiny-Ollama HF
+> image, ADR-012).** Decision: the public Space runs a **tiny Ollama model baked into
+> one container** (no key, no cloud quota, always up) — not a Gemini-key Space. New:
+> `Dockerfile.hf` (multi-stage; installs the Ollama binary + `zstd`; bakes the ledger;
+> non-root UID 1000; runtime deps `requirements-hf.txt` = runtime set + `langchain-ollama`,
+> no Gemini SDK; pins `OLLAMA_MODEL=qwen2.5:1.5b` for a deterministic demo footprint),
+> `scripts/hf_entrypoint.sh` (`ollama serve` → pull the model → serve uvicorn NOW →
+> **background** plan-cache warm), `scripts/deploy_space.sh` (mirrors forge-pdm F6),
+> `docs/DEPLOY.md`, ADR-012. **Built + ran end-to-end here on Docker Desktop.**
+>
+> **Findings from actually building it (each fixed):** (1) `docker build` pip/npm hit the
+> the employer a corporate network appliance **TLS-MITM** — daemon pulls base images fine, but installs *inside* the
+> build don't trust the corp CA. Fix: OPTIONAL `corp-ca.cr[t]` (glob) COPY’d in +
+> `update-ca-certificates`; **git-ignored, never shipped**; a NO-OP on HF's clean runners.
+> (2) Ollama installer needs **`zstd`** (slim image lacks it). (3) `--select` prints TWO
+> stdout lines (`OLLAMA_MODEL=` **and** `HAS_GPU=`) → the entrypoint must grep just the
+> model line. (4) The runtime **ONNX embedding download** (ChromaDB MiniLM) also hit the
+> MITM → set `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` to the system bundle
+> (AFTER pip, so it doesn't bust the cached dep layer); verified live: `EMBEDDING_OK
+> dim=384`. (5) **UX fix:** warming 8 seed Qs on the tiny CPU model is slow (~2 tok/s,
+> ~25 s/answer) — doing it *before* serving left `/api/health`+UI dead for minutes → moved
+> the warm to the **background** so uvicorn is live immediately. Tiny-CPU inference is slow
+> by nature; the plan-cache hides it on headline Qs. **These CA/zstd findings are portable
+> to the other public Spaces (forge-pdm already deployed) — candidate ACHADOS.**
 
 > **2026-07-02 — Phase 6 LAYER 2 DONE (grammar-constrained tool-calls, ADR-011).**
 > **Tested first (per the "measure, don't assume" call) and it refuted the plan's

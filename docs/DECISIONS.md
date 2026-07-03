@@ -5,6 +5,61 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-012 — Self-contained tiny-Ollama Hugging Face Space (`Dockerfile.hf`)
+
+**Status:** Accepted · 2026-07-03
+
+### Context
+
+Phase 6 Layer 3 needs a **reachable public URL** — the "click here and try it"
+link that turns "I containerized an app" into a page a reviewer can use. The
+question was what the Space actually runs for inference. Two viable paths:
+
+- **Gemini-key Space** — fast, strong answers, but depends on a `GEMINI_API_KEY`
+  secret + the free-tier quota; a stray demo run can burn the key, and the story
+  becomes "it calls a cloud model," which any wrapper does.
+- **Self-contained local model** — the container runs its *own* tiny model
+  (Ollama), no key, no quota, always up.
+
+### Decision
+
+Ship a **self-contained tiny-Ollama image** ([`Dockerfile.hf`](../Dockerfile.hf))
+as the public Space:
+
+- Base `python:3.11-slim`, multi-stage (Node builds `web/dist`), the **Ollama
+  server binary installed in the image**, and the synthetic ledger **baked at
+  build time** (`python data/generate.py`). Non-root UID 1000 with a writable
+  `HOME` so `~/.ollama` and `data/chroma` are writable at runtime.
+- Runtime deps are `requirements-hf.txt` — the runtime set **+ `langchain-ollama`,
+  minus `langchain-google-genai`** (the Space is the local path; dropping the
+  cloud SDK keeps the image lean).
+- The model is **pulled at startup, not baked** ([`scripts/hf_entrypoint.sh`](../scripts/hf_entrypoint.sh)):
+  `ollama serve` → resolve the tag via `python -m src.core.hardware --select`
+  (ADR-010; on HF free CPU = 2 vCPU / 16 GB it picks the tiny floor, default
+  `qwen2.5:1.5b`) → `ollama pull` → **pre-warm the plan-cache**
+  (`python -m data.seed_plan_cache`, ADR-009) → `exec uvicorn`. Pulling at startup
+  keeps the image small and lets `OLLAMA_MODEL=auto` choose per the host box.
+- Env pins `PRIMARY_PROVIDER=ollama`, `PLAN_CACHE_ENABLED=true`, an
+  `APP_API_KEY` baked to match `VITE_API_KEY` (same-origin demo, no login).
+
+### Consequences
+
+- **Zero secrets, zero cloud quota, always up** — the cleanest portfolio story: a
+  free URL that runs its own model. No key to leak, nothing to rate-limit.
+- **Latency shape:** the plan-cache replays the **headline questions
+  deterministically without the LLM** (ADR-009) → instant even on CPU. A *novel*
+  question pays the tiny-CPU cost (~tens of seconds). Acceptable for a demo, and
+  it makes ADR-011's "shines with a better model" line tangible.
+- **Deploy mechanics** (mirroring the forge-pdm F6 Space): a dedicated
+  `space-deploy` branch carries the HF README front-matter + this image as the
+  *literal* `Dockerfile` (HF ignores `dockerfile_path`); `main` keeps the Gemini
+  `Dockerfile` and an LFS-free tree. See [`docs/DEPLOY.md`](DEPLOY.md).
+- **Deferred (needs a GPU box):** the tiny-vs-**strong** comparison number for the
+  README — the tiny live link and its own eval/latency numbers ship from here; the
+  strong-model delta is added later.
+
+---
+
 ## ADR-011 — Grammar-constrained tool-calling for tiny local models
 
 **Status:** Accepted · 2026-07-02

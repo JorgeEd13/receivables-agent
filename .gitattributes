@@ -1,0 +1,4 @@
+# Shell scripts must stay LF even when checked out on Windows — a CRLF shebang
+# line breaks in a Linux container (`bad interpreter: /usr/bin/env bash^M`). The HF
+# Space entrypoint (scripts/hf_entrypoint.sh) runs inside the container, so pin LF.
+*.sh text eol=lf

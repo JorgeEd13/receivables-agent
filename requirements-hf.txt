@@ -1,0 +1,22 @@
+# Runtime deps for the self-contained Hugging Face Space image (Dockerfile.hf).
+#
+# Unlike requirements.txt (the Gemini-cloud demo image), the Space runs the
+# **local** provider: a tiny Ollama model served inside the same container, no
+# API key, no cloud quota. So this list swaps the cloud SDK for the Ollama one.
+#   * langchain-ollama  — the local provider (ADR-004 dual-provider; here it is
+#                         the only one, PRIMARY_PROVIDER=ollama).
+#   * langchain-google-genai is intentionally OMITTED — Gemini is not the Space's
+#                         path, and dropping it keeps the image lean.
+# Mirrors pyproject's runtime deps + the `ollama` and `data` extras.
+duckdb>=1.1
+langgraph>=1.0
+langchain-core>=0.3
+pydantic>=2
+pydantic-settings>=2
+chromadb>=1.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+# Local LLM provider for the public demo (grammar-constrained for tiny models, ADR-011).
+langchain-ollama>=0.2
+# Builds the synthetic ledger during the image build.
+faker>=30
