@@ -226,3 +226,44 @@ def test_multi_turn_requests_are_not_cached(cache, con) -> None:
     agent.invoke(payload)
     agent.invoke(payload)
     assert stub.calls == 2  # never served from cache
+
+
+# --- curated seed plans (baked into the demo image) --------------------- #
+
+
+def test_curated_plans_are_all_guard_valid_and_replayable() -> None:
+    """Every curated plan (data/curated_plans.py) must be safe to bake: only
+    replayable tools, and every query_ledger SQL passes sql_guard read-only."""
+    from data.curated_plans import curated_plans
+    from src.agent.plan_cache import REPLAYABLE_TOOLS
+    from src.agent.sql_guard import guard_query
+
+    plans = curated_plans()
+    assert plans, "expected curated seed plans"
+    for question, plan in plans.items():
+        assert plan.steps, f"empty plan for: {question}"
+        for step in plan.steps:
+            assert step.tool in REPLAYABLE_TOOLS, f"{question}: non-replayable {step.tool}"
+            if step.tool == "query_ledger":
+                sql = step.args.get("sql")
+                assert isinstance(sql, str) and sql.strip()
+                guard_query(sql)  # raises if not read-only / allow-listed
+            elif step.tool == "search_policy":
+                assert isinstance(step.args.get("query"), str) and step.args["query"].strip()
+
+
+def test_curated_questions_match_ui_suggestions() -> None:
+    """The UI's one-click SUGGESTIONS must all be curated (so every chip is an
+    instant, correct cache hit). Guards against the two lists drifting apart."""
+    import re
+    from pathlib import Path
+
+    from data.curated_plans import CURATED_PLANS
+
+    app_jsx = Path(__file__).resolve().parents[1] / "web" / "src" / "App.jsx"
+    text = app_jsx.read_text(encoding="utf-8")
+    block = re.search(r"const SUGGESTIONS = \[(.*?)\];", text, re.S).group(1)
+    suggestions = re.findall(r'"([^"]+)"', block)
+    assert suggestions, "no SUGGESTIONS found in App.jsx"
+    missing = [s for s in suggestions if s not in CURATED_PLANS]
+    assert not missing, f"UI suggestions not in curated cache: {missing}"

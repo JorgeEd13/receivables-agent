@@ -69,26 +69,23 @@ ollama pull "${MODEL}"
 export OLLAMA_MODEL="${MODEL}"
 echo "[entrypoint] model ready: ${OLLAMA_MODEL}"
 
-# 3) Pre-warm the plan-cache in the BACKGROUND (best-effort). Warming runs 8
-#    seed questions through the tiny CPU model, which is slow (minutes) — doing it
-#    BEFORE serving would leave `/api/health` and the UI dead during a long cold
-#    start (a bad "click here and try it" experience, and HF may flag the port as
-#    unhealthy). Instead we serve immediately and warm behind it: the ChromaDB
-#    plan-cache is shared on disk, so once a seed plan lands, that question replays
-#    instantly for visitors (ADR-009). A short delay lets uvicorn build the policy
-#    index first (the one-time ONNX embedding download) so the two don't race on it.
+# 3) The plan-cache is BAKED at build time with curated, guard-validated plans
+#    (see Dockerfile.hf) — so the demo's one-click questions are instant from the
+#    first request, with no slow model-warm on startup. As a cheap safety net (in
+#    case the baked cache dir didn't ship), re-seed the CURATED plans in the
+#    background: it's model-free and idempotent (upsert by question), so it can't
+#    hurt and it heals a missing cache without blocking serving.
 (
-  sleep 20
-  echo "[entrypoint] (bg) pre-warming the plan-cache…"
-  if python -m data.seed_plan_cache; then
-    echo "[entrypoint] (bg) plan-cache warmed."
+  echo "[entrypoint] (bg) ensuring curated plan-cache is present…"
+  if PYTHONIOENCODING=utf-8 python -m data.seed_plan_cache --curated >/dev/null 2>&1; then
+    echo "[entrypoint] (bg) curated plan-cache ready."
   else
-    echo "[entrypoint] (bg) WARN: plan-cache warm-up failed; novel questions hit the LLM." >&2
+    echo "[entrypoint] (bg) WARN: curated seeding failed; cached Qs rely on the baked cache." >&2
   fi
 ) &
 
 # 4) Serve NOW. exec so uvicorn becomes PID 1 and receives signals directly. Its
 #    lifespan builds the agent + policy index once on startup, then `/api/health`
-#    is live and the UI answers (headline questions get faster as the bg warm lands).
+#    is live and the UI answers — seeded questions replay instantly from the baked cache.
 echo "[entrypoint] starting serving on :${PORT}"
 exec uvicorn src.api.app:app --host 0.0.0.0 --port "${PORT}"

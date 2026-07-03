@@ -39,7 +39,68 @@ SEED_QUESTIONS: list[str] = [
 ]
 
 
-def main() -> int:
+def seed_curated() -> int:
+    """Write the hand-authored plans (``data/curated_plans.py``) into the cache.
+
+    No model, no ledger call: each curated plan is re-validated through the same
+    ``sql_guard`` the live warm path uses (never store an unsafe plan), then
+    upserted. This is what the image build runs so the demo's one-click questions
+    are instant + correct from the first request and survive every restart (ADR-012).
+    """
+    import chromadb
+
+    from data.curated_plans import curated_plans
+    from src.agent.plan_cache import Plan, get_plan_cache
+    from src.agent.sql_guard import GuardrailError, guard_query
+    from src.core.config import get_settings
+    from src.rag.embeddings import default_embedding_function
+
+    settings = get_settings()
+    if not settings.plan_cache_enabled:
+        print("plan_cache_enabled is False — nothing to seed.")
+        return 1
+
+    client = chromadb.PersistentClient(path=settings.chroma_path)
+    cache = get_plan_cache(
+        client,
+        settings.plan_cache_collection,
+        default_embedding_function(),
+        similarity_threshold=settings.plan_cache_threshold,
+    )
+
+    def _validated(plan: Plan) -> bool:
+        # Mirror plan_from_messages' guarantee: every query_ledger SQL is read-only
+        # and guard-valid before it can be cached.
+        for step in plan.steps:
+            if step.tool == "query_ledger":
+                sql = step.args.get("sql")
+                if not isinstance(sql, str):
+                    return False
+                try:
+                    guard_query(sql)
+                except GuardrailError:
+                    return False
+        return True
+
+    written = 0
+    for question, plan in curated_plans().items():
+        if not _validated(plan):
+            print(f"  ✗ REJECTED (guard) — not cached: {question}")
+            continue
+        cache.warm(question, plan)
+        written += 1
+        print(f"  ✓ curated plan cached: {question}")
+
+    print(f"\nSeeded {written} curated plans into '{settings.plan_cache_collection}'.")
+    return 0 if written else 1
+
+
+def seed_via_model() -> int:
+    """Warm the cache by asking the live agent each seed question (model-authored).
+
+    Slower and hardware-dependent; kept for local/dev use. The image build uses the
+    curated path instead (see ``seed_curated``).
+    """
     from src.agent.cached_agent import CachedAgent
     from src.agent.graph import build_agent
     from src.core.config import get_settings
@@ -68,6 +129,19 @@ def main() -> int:
 
     print(f"\nWarmed {warmed}/{len(SEED_QUESTIONS)} example plans.")
     return 0
+
+
+def main() -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(description="Seed the semantic plan-cache.")
+    p.add_argument(
+        "--curated",
+        action="store_true",
+        help="write hand-authored, guard-validated plans (no model; used by the image build)",
+    )
+    args = p.parse_args()
+    return seed_curated() if args.curated else seed_via_model()
 
 
 if __name__ == "__main__":

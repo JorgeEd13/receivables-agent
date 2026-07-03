@@ -85,6 +85,15 @@ RUN curl -fsSL https://ollama.com/install.sh | sh
 COPY requirements-hf.txt ./
 RUN pip install --no-cache-dir -r requirements-hf.txt
 
+# Point the runtime Python TLS stack at the system CA bundle so BUILD-time TLS
+# calls (the one-time ONNX MiniLM embedding download during the curated cache bake
+# below) AND runtime calls verify behind a TLS-inspecting proxy locally. A NO-OP on
+# HF (that IS the default bundle there). Set AFTER pip so it can't invalidate the
+# cached dependency layer, but BEFORE the seed step that needs it.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 COPY src/ ./src/
 COPY data/ ./data/
 COPY scripts/ ./scripts/
@@ -93,6 +102,13 @@ COPY --from=web /web/dist ./web/dist
 # Bake the synthetic ledger at image-build time (deterministic, ~45s). The
 # .dockerignore excludes any local *.duckdb so the image always builds it fresh.
 RUN python data/generate.py
+
+# Bake the plan-cache with the CURATED (hand-authored, guard-validated) plans so
+# the demo's one-click questions are instant + correct from the FIRST request and
+# survive every restart — no model needed at build, no post-deploy warm window
+# (ADR-012). This downloads the one-time ONNX MiniLM embeddings (verifies via the
+# CA bundle above). PYTHONIOENCODING keeps the ✓ log lines safe on any console.
+RUN PYTHONIOENCODING=utf-8 python -m data.seed_plan_cache --curated
 
 # The Space PINS a known-good tiny model for a deterministic public demo, rather
 # than OLLAMA_MODEL=auto (which is the right choice for local dev across varied
@@ -108,14 +124,6 @@ ENV PRIMARY_PROVIDER=ollama \
     OLLAMA_KEEP_ALIVE=30m \
     PLAN_CACHE_ENABLED=true \
     APP_API_KEY=demo-key
-
-# Point the runtime Python TLS stack at the system CA bundle so the one-time ONNX
-# embedding-model download (ChromaDB/huggingface_hub, at startup) verifies behind a
-# TLS-inspecting proxy locally. A NO-OP on HF (that IS the default bundle there);
-# set AFTER pip so it can't invalidate the cached dependency layer.
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
-    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # HF Spaces runs the container as a non-root user with UID 1000. Give it a writable
 # home so `ollama serve` (~/.ollama models) and the ChromaDB index (data/chroma)
