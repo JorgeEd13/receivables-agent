@@ -19,6 +19,17 @@ novel question is slower and its SQL may be weaker — that's the "shines with a
 model" story (ADR-011). The strong-model numbers are captured on a GPU box and quoted
 separately; the Space never implies the tiny model *is* the ceiling.
 
+**Security posture (the keyless demo is deliberate, not a gap).** The demo bakes a
+public `APP_API_KEY=demo-key` into the image so the same-origin UI can reach the API
+with no login — anyone can use the playground, by design. That key guards nothing
+sensitive, because the *real* protection is architectural and unchanged from the
+private path: every question goes through the **read-only, allow-listed SQL guardrail**
+(ADR-003) over **100% synthetic** data — writes/DDL/catalog access are rejected before
+execution, and there is no PII or proprietary data to reach. A production deployment
+flips exactly one thing (a real secret key + auth in front) without touching the
+guardrail. So the open key is a demo convenience layered *on top of* a
+defense-in-depth core — showcasing the guardrail, not bypassing it.
+
 ## Latency shape (set expectations)
 
 - **Headline / seeded questions** → plan-cache hit → replayed deterministically
