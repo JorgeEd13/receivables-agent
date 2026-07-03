@@ -13,6 +13,25 @@ here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number**
 notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
 better model" delta); everything else for the live link is done.
 
+> **2026-07-03 — Baked curated plan-cache + ONNX model (instant & correct from first
+> request).** Every redeploy wiped the plan-cache (warmed at startup) → a multi-minute slow
+> window even on the suggested chips. Now baked at BUILD time: `data/curated_plans.py`
+> (hand-authored, `sql_guard`-validated plans for the 8 seed Qs — correct SQL/policy queries,
+> re-run LIVE on a hit so ADR-009 honesty holds), `seed_plan_cache.py --curated` (model-free),
+> run in `Dockerfile.hf` after the ledger bake → `data/chroma` ships warm (count=8, verified
+> in-image). Entrypoint dropped the slow tiny-model warm; a cheap curated re-seed self-heals.
+> **Gotcha (caught on the live Space, fixed):** the build downloaded the ONNX MiniLM embedder as
+> ROOT (`/root/.cache`), but the container runs as appuser → runtime re-download, which on HF
+> produced a TRUNCATED `model.onnx` → `INVALID_PROTOBUF`, Exit 3, startup crash-loop. Fix: COPY
+> the known-good 90 MB model into `/home/appuser/.cache` at build; verified with
+> `docker run --network none` (embedder loads offline, lookup hits). **Verified LIVE:** Space
+> recovers, a seeded Q answers in **1.4 s the moment it starts** (baked cache, no warm window),
+> and a NOVEL Q streams a `query_ledger` tool event at ~28 s (correct routing + live progress,
+> not a frozen screen). Tests: curated plans guard-valid + UI suggestions ⊆ curated. **Suite 115.**
+> Follow-up: `deploy_space.sh` should auto-sync the literal `Dockerfile` from `Dockerfile.hf`
+> (manual each deploy today). Still deferred: trim the ~2500-tok tiny-model prompt; firm up
+> routing for paraphrases like "top 5 / most overdue money"; Layer 4 tiny-vs-strong number.
+>
 > **2026-07-03 — SSE streaming (live "watch it think") + demo-UX hardening.** Real
 > browser testing showed novel (typed) questions are slow (tiny 1.5B on free CPU) and
 > a static "Thinking…" reads as hung. Added a **streaming endpoint** `POST /api/chat/stream`
