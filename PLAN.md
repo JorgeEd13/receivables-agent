@@ -55,7 +55,7 @@ suite (golden questions with property checks, ledger-verified expectations).
 ADR-008. (The live accuracy *number* is captured on a machine with a provider —
 see `docs/DEMO.md` / `docs/STATE.md`.)
 
-### Phase 6 — Public zero-key "click-and-try" demo  ⏳ (next)
+### Phase 6 — Public zero-key "click-and-try" demo  ✅ LIVE (only the strong-model number deferred)
 
 **Goal:** anyone opens the hosted URL and gets a working agent **without installing
 anything or supplying an API key**, on a **free** CPU tier — while the "point a
@@ -116,26 +116,58 @@ Original scope below.
 - *Not doing:* custom tokenization — we use a pretrained model; token savings come from the
   already-lean schema hint + KV cache, not from touching the tokenizer.
 
-**Layer 3 — Self-contained deploy + honest framing.** Reuse the forge-pdm F6 mechanics
-*exactly* (they are already paid-for lessons): a separate `Dockerfile.hf` (distinct from the
-Gemini `Dockerfile` — the Gemini image/compose stays intact on `main`), a dedicated
-`space-deploy` branch with HF front-matter (`sdk: docker`, `app_port`) + LFS for the model
-if needed, `deploy_space.sh`. The three container-only gotchas from forge-pdm F6 apply (HF
-ignores `dockerfile_path` → literal `Dockerfile`; package-vs-source data paths resolve from
-the script; bake at **startup** not build). Honest banner in UI + README: *"This live demo
-runs a tiny local model on free CPU (slow, limited). The architecture — governed text-to-SQL
-+ RAG — is the product; point it at Claude / GPT-4 / a Gemini key and it shines."*
+**Layer 3 — Self-contained deploy + honest framing.  ✅ (ADR-012, LIVE)**
+Done + deployed from the **desktop** (Docker daemon + git-push-to-HF both work past the corp
+TLS proxy). `Dockerfile.hf` (multi-stage; installs the Ollama binary + `zstd`; bakes the
+ledger; non-root UID 1000; pins `OLLAMA_MODEL=qwen2.5:1.5b` for a deterministic demo),
+`requirements-hf.txt` (runtime + `langchain-ollama`, no Gemini SDK), `scripts/hf_entrypoint.sh`
+(`ollama serve` → pull → serve uvicorn), `scripts/deploy_space.sh`, `docs/DEPLOY.md`. Deployed
+via a `space-deploy` branch (HF front-matter README + the image as the literal `Dockerfile` +
+`.gitattributes` LFS-tracking `*.png`/`*.gif`). Honest security + latency banners in DEPLOY.md
+and the UI. **LIVE: https://jorgeed-receivables-agent.hf.space.** Build gotchas (each fixed,
+ACHADOS): corp-CA needed for in-build pip/npm/ONNX (git-ignored, no-op on HF); `zstd`; the ONNX
+embedder must be baked into **appuser's** cache (root-download → runtime re-download corrupted
+= `INVALID_PROTOBUF` crash).
 
-**Layer 4 — README + honest numbers.** Live Space link at the top (like forge-pdm's `/health`);
-capture the two still-pending real numbers (`evals.run` pass-rate + one latency) on the
-notebook — ideally for **both** the tiny model (honest floor) and a strong model (the ceiling),
-showing the delta the banner claims.
+**Layer 4 — README + honest numbers.  ◑ (tiny side done; strong side deferred to GPU).**
+README carries the live "try it" badge + link. The tiny-model live link and its own behaviour
+are shipped and verified; the **tiny-vs-strong** number (`evals.run` pass-rate + one latency vs
+a strong model, the delta the banner claims) still needs the **notebook GPU** — deferred.
 
-**Sequencing / effort:** ~2 sessions, zero cost. **Layer 1 first (this repo, on the desktop,
-no model)** — it alone resolves the mutable-data concern and is the highest-value piece.
-Layers 2–3 need the notebook (model + normal network, same constraint as the original ship
-gate). Layer 4 closes it. → ADR-009 (plan-cache = cache reasoning not answers · grammar-
-constrained tool-calls · self-contained zero-key image, separate from the Gemini path).
+**Layer 5 — Demo hardening (from live browser testing).  ✅ (ADR-012/013, LIVE).**
+Real use surfaced demo-quality problems that unit tests couldn't; each fixed + verified live:
+- **SSE streaming** (`POST /api/chat/stream`, `CachedAgent.astream`): the UI shows the agent
+  *thinking* live — `cached` / `tool` (Querying the ledger / Reading the policy) / `answer`
+  events + an elapsed timer — so a slow tiny-CPU answer never looks frozen (turns the free-tier
+  slowness into a "watch it think" feature).
+- **Baked curated plan-cache** (`data/curated_plans.py`, `seed_plan_cache.py --curated`, baked in
+  `Dockerfile.hf`): the 8 showcased questions are **instant (~1.5 s) + correct from the first
+  request after every deploy** — no warm window, no tiny-model mis-routing on the showcased path.
+- **Tiny-model prompt/routing/recursion (ADR-013):** a 57%-shorter tiny-tier prompt (729→310
+  tok) with one firm routing rule (default `query_ledger`; policy only for explicit rule Qs) +
+  `agent_recursion_limit=8` and a graceful `GraphRecursionError` message — a novel "top 5" now
+  uses **only** the ledger and answers (~80 s) instead of over-calling the policy and thrashing
+  ~250 s.
+- **Cache hits mid-conversation** (dropped the `len(messages)!=1` guard on lookup) + **no
+  auto-scroll-yank** while reading + a persistent **"Instant:" quick-bar**.
+
+**Deferred (next session — pick up cleanly, nothing to reinvent):**
+- **Widen the curated seed set** — the highest-value remaining demo win, fully desktop-doable.
+  Add more **natural phrasings** of the showcased questions (e.g. "top 5 / which 5 / the most
+  overdue money" → the top-overdue plan; DSO / aging rewordings) and a few more question types,
+  so more of what a reviewer *types* is an **instant cache hit** instead of an ~80 s live run.
+  Mechanically: append entries to `data/curated_plans.py` (each a guard-valid `Plan`) — the SQL
+  is re-run live so numbers stay fresh; add the new UI chips (keep `test_curated_questions_match_
+  ui_suggestions` green); rebuild bakes them. Jorge's idea to also cache **computed key facts**
+  fits here as curated plans (the plan re-runs the SQL, so it's never a frozen value).
+- **Layer 4 strong-model number** — on the notebook GPU: `evals.run` pass-rate + one latency vs a
+  strong model → the tiny-vs-strong delta in the README.
+
+**Sequencing / effort:** Layers 1–3 + 5 all shipped (Layer 1 on the desktop; 2–5 built AND
+deployed from the desktop once Docker + git-to-HF were proven to work past the proxy — the
+notebook was NOT required after all). → ADR-009 (plan-cache), ADR-010 (hardware-aware),
+ADR-011 (grammar-constrained), ADR-012 (self-contained tiny-Ollama Space + baked cache/ONNX),
+ADR-013 (tiny-model prompt/routing/recursion).
 
 ### Phase 7 — FIA-parity sweep + hardware-awareness  ⏳ (planned — next sessions)
 

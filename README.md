@@ -38,12 +38,15 @@ question. Under the hood it's a ReAct agent that combines a **guarded
 text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
-> **Status: working MVP.** The agent, the guarded SQL + RAG tools, the FastAPI
-> service, the React UI, the one-command Docker run, the AI-native layer (MCP
-> server + eval suite) and a **semantic plan-cache** are all implemented and
-> tested (Phases 0–5 + Phase 6 Layer 1, 88 tests). A public, clean-room portfolio
-> project on 100% synthetic data. See [`PLAN.md`](PLAN.md) for the roadmap and
-> [`docs/STATE.md`](docs/STATE.md) for current progress.
+> **Status: shipped + live.** The agent, the guarded SQL + RAG tools, the FastAPI
+> service (with **live SSE streaming** — watch the agent think), the React UI, the
+> one-command Docker run, the AI-native layer (MCP server + eval suite), a
+> **semantic plan-cache** and **hardware-aware / grammar-constrained** local models
+> are all implemented and tested (Phases 0–6, **118 tests**), and the whole thing is
+> **deployed to a free, self-contained Hugging Face Space** running a tiny local model
+> (no API key). A public, clean-room portfolio project on 100% synthetic data. See
+> [`PLAN.md`](PLAN.md) for the roadmap, [`docs/DEPLOY.md`](docs/DEPLOY.md) for the
+> live deploy, and [`docs/STATE.md`](docs/STATE.md) for current progress.
 
 ![receivables-agent demo](docs/demo.gif)
 
@@ -52,6 +55,17 @@ policy**.
 *and* the cited rule. The `tools_used` badge shows which tools each answer hit.
 Recorded against a local Ollama model (`qwen2.5:7b`); a `GEMINI_API_KEY` works
 the same way.*
+
+### 🚀 Try it live
+
+**[jorgeed-receivables-agent.hf.space](https://jorgeed-receivables-agent.hf.space)** — a
+self-contained Hugging Face Space that runs its **own tiny local model** (no API key, 100%
+synthetic data). The one-click **example questions answer instantly** (pre-computed *plans*
+that are re-run live against the ledger, so the numbers are always current); a **typed**
+question runs the tiny model on a free CPU, so it's slower — the UI streams the agent's steps
+live and shows an elapsed timer so you can watch it think. That slowness is the honest
+free-tier floor: the *architecture* (governed text-to-SQL + RAG) is the product — point it at
+a stronger model and the same code shines. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## What it does
 
