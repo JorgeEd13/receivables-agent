@@ -22,13 +22,22 @@ number is current even after the ledger changes.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 import duckdb
 from chromadb.api.models.Collection import Collection
 
+from src.agent.message_utils import final_text as _final_of
+from src.agent.message_utils import tools_used as _tools_used_of
 from src.agent.plan_cache import PlanCache, plan_from_messages
 from src.agent.plan_replay import ReplayError, ReplayResult, replay_plan
+
+# Streaming event vocabulary (see `astream`): the API turns each dict into one SSE
+# event so the UI can show live progress. Kept tiny and stable.
+#   {"type": "cached"}                         — a plan-cache hit; answer is imminent
+#   {"type": "tool",   "name": "query_ledger"} — the agent invoked a tool
+#   {"type": "answer", "reply": str, "tools_used": [str]} — the final answer
+#   {"type": "error",  "message": str}         — the turn failed
 
 
 def _last_user_message(messages: list[dict[str, Any]]) -> str | None:
@@ -99,6 +108,56 @@ class CachedAgent:
         result = await self._agent.ainvoke(payload)
         self._warm(messages, result["messages"])
         return result
+
+    async def astream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """Yield progress events for one turn (for the SSE endpoint).
+
+        On a **cache hit** we emit a ``cached`` marker, one ``tool`` event per tool
+        the replay used, then the final ``answer`` — fast, no LLM. On a **miss** we
+        stream the wrapped agent's real step events (a ``tool`` event as each tool
+        starts) and finish with the ``answer`` once the loop ends, warming the cache.
+        Any failure surfaces as an ``error`` event rather than a broken stream.
+        """
+        messages = payload["messages"]
+        hit = self._try_cache(messages)
+        if hit is not None:
+            out = hit["messages"]
+            yield {"type": "cached"}
+            for name in _tools_used_of(out):
+                yield {"type": "tool", "name": name}
+            yield {"type": "answer", "reply": _final_of(out), "tools_used": _tools_used_of(out)}
+            return
+
+        # Miss: stream the real ReAct loop. `astream_events` surfaces a
+        # `on_tool_start` per tool call; the final state carries the answer.
+        final_messages: list[Any] | None = None
+        seen: set[str] = set()
+        try:
+            async for event in self._agent.astream_events(payload, version="v2"):
+                kind = event.get("event")
+                if kind == "on_tool_start":
+                    name = event.get("name", "")
+                    if name and name not in seen:
+                        seen.add(name)
+                        yield {"type": "tool", "name": name}
+                elif kind == "on_chain_end":
+                    data = event.get("data", {}) or {}
+                    output = data.get("output")
+                    if isinstance(output, dict) and "messages" in output:
+                        final_messages = output["messages"]
+        except Exception as exc:  # keep the stream well-formed on any failure
+            yield {"type": "error", "message": str(exc)}
+            return
+
+        if final_messages is None:
+            yield {"type": "error", "message": "no response produced"}
+            return
+        self._warm(messages, final_messages)
+        yield {
+            "type": "answer",
+            "reply": _final_of(final_messages),
+            "tools_used": _tools_used_of(final_messages),
+        }
 
     # --- internals ------------------------------------------------------- #
 

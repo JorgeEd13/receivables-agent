@@ -15,16 +15,20 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
+from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 
 from src.agent.graph import build_agent
+from src.agent.message_utils import final_text as _final_text
+from src.agent.message_utils import tools_used as _tools_used
 from src.api.schemas import ChatRequest, ChatResponse, HealthResponse
 from src.core.config import Settings, get_settings
 
@@ -92,36 +96,51 @@ def create_app(agent_builder: AgentBuilder = _default_agent_builder) -> FastAPI:
         out = result["messages"]
         return ChatResponse(reply=_final_text(out), tools_used=_tools_used(out))
 
+    @app.post(
+        "/api/chat/stream",
+        tags=["chat"],
+        dependencies=[Depends(require_api_key)],
+    )
+    async def chat_stream(req: ChatRequest, agent: Any = Depends(get_agent)) -> StreamingResponse:
+        """Server-Sent Events variant of ``/api/chat``.
+
+        Streams the agent's progress so the UI can show it *thinking* — vital on
+        the free-CPU Space where a tiny model can take a while. Each event is a
+        one-line JSON object (see ``CachedAgent.astream``): ``cached`` /
+        ``tool`` / ``answer`` / ``error``. Agents without ``astream`` (e.g. a
+        test stub or an un-cached build) degrade to a single ``answer`` event.
+        """
+        messages = [m.model_dump() for m in req.history]
+        messages.append({"role": "user", "content": req.message})
+
+        async def event_source() -> AsyncIterator[str]:
+            def sse(obj: dict[str, Any]) -> str:
+                return f"data: {json.dumps(obj)}\n\n"
+
+            try:
+                if hasattr(agent, "astream"):
+                    async for ev in agent.astream({"messages": messages}):
+                        yield sse(ev)
+                else:  # no streaming support → one shot
+                    result = await agent.ainvoke({"messages": messages})
+                    out = result["messages"]
+                    yield sse({"type": "answer", "reply": _final_text(out), "tools_used": _tools_used(out)})
+            except Exception as exc:  # never leave the stream half-open
+                yield sse({"type": "error", "message": str(exc)})
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            event_source(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     # Serve the built React app at the root when it exists (production image).
     # In dev the UI runs on the Vite server and calls /api directly.
     if _WEB_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="web")
 
     return app
-
-
-def _final_text(messages: list[Any]) -> str:
-    """The agent's final natural-language answer (last message's content)."""
-    if not messages:
-        return ""
-    content = getattr(messages[-1], "content", messages[-1])
-    if isinstance(content, list):  # some providers return content blocks
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return str(content)
-
-
-def _tools_used(messages: list[Any]) -> list[str]:
-    """Distinct tool names the agent called this turn, in first-seen order."""
-    names: list[str] = []
-    for msg in messages:
-        for call in getattr(msg, "tool_calls", None) or []:
-            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
-            if name and name not in names:
-                names.append(name)
-    return names
 
 
 # The ASGI entrypoint (uvicorn src.api.app:app).

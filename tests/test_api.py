@@ -111,3 +111,68 @@ def test_chat_rejects_unknown_history_role(client):
         headers={"X-API-Key": API_KEY},
     )
     assert resp.status_code == 422
+
+
+# --- streaming (SSE) ---------------------------------------------------- #
+
+
+def _sse_events(text: str) -> list[dict]:
+    """Parse an SSE body into the list of JSON event objects (dropping [DONE])."""
+    import json as _json
+
+    out = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            payload = line[len("data: ") :]
+            if payload != "[DONE]":
+                out.append(_json.loads(payload))
+    return out
+
+
+def test_stream_requires_api_key(client):
+    resp = client.post("/api/chat/stream", json={"message": "hi"})
+    assert resp.status_code == 401
+
+
+def test_stream_without_astream_falls_back_to_one_answer(client):
+    """The stub agent has no ``astream`` → a single ``answer`` event + [DONE]."""
+    resp = client.post(
+        "/api/chat/stream",
+        json={"message": "who owes the most?"},
+        headers={"X-API-Key": API_KEY},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events = _sse_events(resp.text)
+    assert events == [
+        {"type": "answer", "reply": "Customer ACME owes $50k.", "tools_used": ["query_ledger"]}
+    ]
+    assert "data: [DONE]" in resp.text
+
+
+def test_stream_emits_tool_then_answer_events(monkeypatch):
+    """An agent that supports ``astream`` streams tool events then the answer."""
+
+    class _StreamingStub:
+        async def ainvoke(self, payload):  # not used on this path
+            raise AssertionError("astream should be preferred")
+
+        async def astream(self, payload):
+            yield {"type": "tool", "name": "query_ledger"}
+            yield {"type": "answer", "reply": "ACME owes $50k.", "tools_used": ["query_ledger"]}
+
+    monkeypatch.setenv("APP_API_KEY", API_KEY)
+    get_settings.cache_clear()
+    app = create_app(agent_builder=lambda settings: _StreamingStub())
+    with TestClient(app) as c:
+        resp = c.post(
+            "/api/chat/stream",
+            json={"message": "who owes the most?"},
+            headers={"X-API-Key": API_KEY},
+        )
+    get_settings.cache_clear()
+    assert resp.status_code == 200
+    events = _sse_events(resp.text)
+    assert events[0] == {"type": "tool", "name": "query_ledger"}
+    assert events[-1]["type"] == "answer"
+    assert events[-1]["reply"] == "ACME owes $50k."

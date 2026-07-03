@@ -13,6 +13,22 @@ here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number**
 notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
 better model" delta); everything else for the live link is done.
 
+> **2026-07-03 — SSE streaming (live "watch it think") + demo-UX hardening.** Real
+> browser testing showed novel (typed) questions are slow (tiny 1.5B on free CPU) and
+> a static "Thinking…" reads as hung. Added a **streaming endpoint** `POST /api/chat/stream`
+> (SSE): `CachedAgent.astream` emits `cached`/`tool`/`answer`/`error` events — real
+> `on_tool_start` events on a cache MISS (via LangGraph `astream_events`), synthetic tool
+> events on a HIT. Shared `src/agent/message_utils.py` (final-text + tools-used, de-duped
+> from `app.py`). UI (`web/src/App.jsx`) consumes the stream: live step list ("Querying the
+> ledger" → "Reading the collections policy"), an **elapsed-seconds** counter, and an honest
+> "tiny model on a free CPU, it's working not stuck" hint after 6 s. 3 new streaming API
+> tests. **Suite 113 green.** NOTE: local container verification is impractical here (the
+> throttled corp proxy makes the in-container `ollama pull` take ~1 h); streaming is
+> unit-tested + will be verified LIVE on HF (clean fast network). **Still deferred (plan):
+> bake the plan-cache at build (every redeploy currently re-warms → slow window), trim the
+> tiny-model prompt (~2500 tok/turn → the real speed lever), firm up tool-routing so
+> "top N customers" hits `query_ledger` not the policy, and the Layer 4 tiny-vs-strong number.**
+>
 > **2026-07-03 — Phase 6 LAYER 3 LIVE.** Space deployed via a `space-deploy` branch
 > (HF front-matter README + tiny-Ollama image as the literal `Dockerfile` + `.gitattributes`
 > LFS-tracking `*.png`/`*.gif` — HF rejects plain-git binaries). HF builds `Dockerfile.hf`

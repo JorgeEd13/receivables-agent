@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { sendChat } from "./api.js";
+import { streamChat } from "./api.js";
+
+// Human-readable labels for the agent's tools, shown as live progress steps.
+const TOOL_LABELS = {
+  query_ledger: "Querying the ledger",
+  search_policy: "Reading the collections policy",
+};
 
 // These MUST mirror the plan-cache seed set (data/seed_plan_cache.py) so every
 // one-click suggestion is a cache hit that replays in ~3s — instant on the free
@@ -18,37 +24,61 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  // Whether the in-flight question is a one-click suggestion. Suggestions are
-  // plan-cache hits (fast, ~3s); a typed question runs the live tiny model on a
-  // free CPU and can take a while — the "Thinking…" copy reflects that.
-  const [cachedAsk, setCachedAsk] = useState(false);
+  // Live progress for the in-flight turn, streamed from /api/chat/stream:
+  //   cached  — a plan-cache hit (fast); steps  — tool events as they happen;
+  //   elapsed — seconds ticking so a slow tiny-model answer never looks frozen.
+  const [progress, setProgress] = useState(null); // {cached, steps: [name], elapsed}
   const scrollRef = useRef(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
-  }, [messages, busy]);
+  }, [messages, busy, progress]);
 
-  async function ask(text, fromSuggestion = false) {
+  // Tick the elapsed-seconds counter while a turn is in flight.
+  useEffect(() => {
+    if (!busy) return;
+    const started = Date.now();
+    const id = setInterval(
+      () => setProgress((p) => (p ? { ...p, elapsed: Math.round((Date.now() - started) / 1000) } : p)),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [busy]);
+
+  async function ask(text) {
     const question = text.trim();
     if (!question || busy) return;
     setError(null);
     setInput("");
-    setCachedAsk(fromSuggestion || SUGGESTIONS.includes(question));
 
     // History sent to the API is the prior conversation (content only).
     const history = messages.map(({ role, content }) => ({ role, content }));
     const next = [...messages, { role: "user", content: question }];
     setMessages(next);
     setBusy(true);
+    setProgress({ cached: false, steps: [], elapsed: 0 });
 
+    let answered = false;
     try {
-      const { reply, tools_used } = await sendChat(question, history);
-      setMessages([...next, { role: "assistant", content: reply, tools: tools_used }]);
+      await streamChat(question, history, (ev) => {
+        if (ev.type === "cached") {
+          setProgress((p) => ({ ...p, cached: true }));
+        } else if (ev.type === "tool") {
+          setProgress((p) => ({ ...p, steps: [...p.steps, ev.name] }));
+        } else if (ev.type === "answer") {
+          answered = true;
+          setMessages([...next, { role: "assistant", content: ev.reply, tools: ev.tools_used }]);
+        } else if (ev.type === "error") {
+          throw new Error(ev.message);
+        }
+      });
+      if (!answered) throw new Error("The agent did not return an answer.");
     } catch (e) {
       setError(e.message);
       setMessages(next); // drop the optimistic turn's pending reply
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -67,7 +97,7 @@ export default function App() {
         {messages.length === 0 && (
           <div className="suggestions">
             {SUGGESTIONS.map((s) => (
-              <button key={s} className="chip" onClick={() => ask(s, true)}>
+              <button key={s} className="chip" onClick={() => ask(s)}>
                 {s}
               </button>
             ))}
@@ -93,11 +123,25 @@ export default function App() {
           </div>
         ))}
 
-        {busy && (
+        {busy && progress && (
           <div className="bubble assistant thinking">
-            {cachedAsk
-              ? "Thinking…"
-              : "Thinking… (a typed question runs the tiny model on a free CPU — this can take up to a minute)"}
+            <div className="progress-head">
+              {progress.cached ? "Replaying a cached plan…" : "Thinking…"}
+              <span className="elapsed">{progress.elapsed}s</span>
+            </div>
+            {progress.steps.length > 0 && (
+              <ul className="steps">
+                {progress.steps.map((name, i) => (
+                  <li key={i}>{TOOL_LABELS[name] || name}</li>
+                ))}
+              </ul>
+            )}
+            {!progress.cached && progress.elapsed >= 6 && (
+              <div className="progress-hint">
+                Running a tiny model on a free CPU — this can take up to a minute.
+                It’s working, not stuck.
+              </div>
+            )}
           </div>
         )}
         {error && <div className="error">{error}</div>}
