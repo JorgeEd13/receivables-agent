@@ -13,6 +13,21 @@ here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number**
 notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
 better model" delta); everything else for the live link is done.
 
+> **2026-07-03 — Tiny-model prompt/routing/recursion (ADR-013) + UI quick-bar — VERIFIED
+> LIVE.** From browser testing: a novel "which 5 customers have the most overdue money?"
+> over-called `search_policy`, looped, thrashed ~250 s, then "did not return an answer".
+> Fixes: a **57 %-shorter** tiny-tier prompt (`SYSTEM_PROMPT_BRIEF`/`SCHEMA_HINTS_BRIEF`,
+> 729→310 tok) with ONE firm rule (default `query_ledger`; policy only for explicit rule
+> Qs; then stop); `agent_recursion_limit=8` on every call so a loop fails in seconds and
+> `astream` catches `GraphRecursionError` → graceful "couldn't finish, try an example"
+> answer. UI: a persistent **"Instant:" quick-bar** keeps cached Qs one click away after the
+> first answer (was empty-chat only). **Verified on the live Space:** the same question now
+> uses **only `query_ledger`**, no policy, and **answers in ~82 s with real customers/numbers**
+> (Lang/Velasquez/Johnson $13.37 M…) — correct, single-tool, completes, live progress the whole
+> time. Also fixed `deploy_space.sh` (patch-id forwarding via `git cherry` + auto-sync the
+> literal Dockerfile). **Suite 117.** Still: tiny-CPU is slow by nature (deferred: widen
+> curated seeds; Layer 4 tiny-vs-strong on GPU). ADR-013.
+>
 > **2026-07-03 — Baked curated plan-cache + ONNX model (instant & correct from first
 > request).** Every redeploy wiped the plan-cache (warmed at startup) → a multi-minute slow
 > window even on the suggested chips. Now baked at BUILD time: `data/curated_plans.py`
