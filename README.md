@@ -222,6 +222,32 @@ See [ADR-009](docs/DECISIONS.md) and
 [`tests/test_plan_cache.py`](tests/test_plan_cache.py) (the freshness test mutates
 the ledger and proves the replayed number moves).
 
+## Runs on the box it's given (tiny model → strong model, no reconfig)
+
+The same code should scale from a free CPU tier to a workstation with a GPU
+without hand-tuning. Two pieces make the local path do that automatically:
+
+- **Hardware-aware model selection** ([`src/core/hardware.py`](src/core/hardware.py),
+  [ADR-010](docs/DECISIONS.md)). `OLLAMA_MODEL=auto` detects RAM / VRAM
+  (`nvidia-smi`) / CPU, computes an *effective memory* budget (VRAM on a GPU box,
+  else ~80% of RAM) and picks the best-fitting **already-downloaded** model from a
+  public catalog. `python -m src.core.hardware` prints the pick for your machine;
+  `--select` emits an `OLLAMA_MODEL=…` line a container entrypoint can consume. No
+  new dependency — psutil is optional, with stdlib fallbacks.
+- **Grammar-constrained tool-calls for tiny models**
+  ([`src/agent/constrained.py`](src/agent/constrained.py), [ADR-011](docs/DECISIONS.md)).
+  A 0.5–1.5B model can't tool-call natively — *measured*, not assumed: one emits
+  valid JSON but invents argument fields and omits the real `sql`; another writes
+  correct SQL in prose and emits no tool call at all. So the local model's reply is
+  constrained to a `{tool, sql|query, answer}` schema (Ollama's `format`, a GBNF
+  grammar underneath) and translated back into `tool_calls`. Measured across the
+  golden questions this moves both tiny models from ≤1/5 to 5/5 well-formed calls.
+  It's **tier-gated** (reusing the hardware catalog): tiny models get the shim,
+  stronger models keep native tool-calling — constraining a capable model would
+  only hold it back. `format` fixes the *structure*; SQL *quality* still scales
+  with the model — which is the whole point: the architecture is reliable at 0.5B,
+  and it *shines with a better model*.
+
 ## How this was built
 
 I architect and review every line; AI accelerates the implementation. The
