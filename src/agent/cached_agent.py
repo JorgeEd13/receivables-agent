@@ -184,11 +184,15 @@ class CachedAgent:
     def _try_cache(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Return a replayed-turn dict on a usable cache hit, else ``None``.
 
-        Only single-turn requests are cache-eligible: a follow-up that depends on
-        prior conversation context is answered by the LLM, not a cached plan.
+        Look up the **latest user question** against the cache regardless of prior
+        history. A cached plan is by construction *self-contained* (it embeds its own
+        SQL / policy query, ADR-009), so recognizing a known question mid-conversation
+        is safe — and it's exactly what a demo needs (clicking a suggested question
+        after the first answer must still be instant, not fall to the slow LLM). A
+        genuine context-dependent follow-up ("and for enterprise only?") simply won't
+        clear the conservative similarity threshold, so it falls through to the LLM.
+        (Warming still requires a single-turn request — see ``_warm``.)
         """
-        if len(messages) != 1:
-            return None
         question = _last_user_message(messages)
         if not question:
             return None

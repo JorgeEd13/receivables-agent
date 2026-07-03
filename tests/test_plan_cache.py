@@ -212,8 +212,34 @@ def test_hit_stays_fresh_after_data_changes(cache, con) -> None:
     assert "3" in result["messages"][-1].content  # current count, not a frozen 2
 
 
-def test_multi_turn_requests_are_not_cached(cache, con) -> None:
-    # A follow-up depends on prior context, so it always goes to the LLM.
+def test_known_question_hits_cache_even_after_prior_turns(cache, con) -> None:
+    """The fix for the demo bug: a self-contained question the cache knows must be
+    served from the cache even when it's asked *after* an earlier Q&A (history is
+    present) — clicking a suggested question mid-chat stays instant, not slow LLM."""
+    stub = _RecordingAgent()
+    agent = _cached_agent(stub, cache, con)
+    q = "how many customers are in the ledger"
+
+    agent.invoke({"messages": [{"role": "user", "content": q}]})  # warm (single-turn)
+    assert stub.calls == 1
+
+    calls_before = stub.calls
+    result = agent.invoke(
+        {
+            "messages": [
+                {"role": "user", "content": "what is our DSO"},
+                {"role": "assistant", "content": "78 days."},
+                {"role": "user", "content": q},  # a known, self-contained question
+            ]
+        }
+    )
+    assert stub.calls == calls_before  # served from cache — the LLM was NOT called
+    assert "2" in result["messages"][-1].content  # replayed live
+
+
+def test_novel_followup_mid_conversation_still_goes_to_llm(cache, con) -> None:
+    # A genuine context-dependent follow-up won't match any cached plan (below the
+    # similarity threshold), so it falls through to the LLM even mid-conversation.
     stub = _RecordingAgent()
     agent = _cached_agent(stub, cache, con)
     payload = {

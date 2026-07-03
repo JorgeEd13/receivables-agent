@@ -30,8 +30,14 @@ export default function App() {
   const [progress, setProgress] = useState(null); // {cached, steps: [name], elapsed}
   const scrollRef = useRef(null);
 
+  // Auto-scroll to the newest content — but ONLY if the user is already near the
+  // bottom. If they've scrolled up to read while the agent is thinking, don't yank
+  // them back down on every progress tick.
   useEffect(() => {
-    scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) el.scrollTo(0, el.scrollHeight);
   }, [messages, busy, progress]);
 
   // Tick the elapsed-seconds counter while a turn is in flight.
