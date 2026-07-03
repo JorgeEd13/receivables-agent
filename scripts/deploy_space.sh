@@ -48,6 +48,16 @@ else
   fi
 fi
 
+# HF ignores the front-matter dockerfile_path and builds the literal `Dockerfile`,
+# so keep it a byte-for-byte copy of the maintained `Dockerfile.hf`. Auto-sync here
+# (instead of by hand every deploy) so the Space can never build a stale image.
+if ! cmp -s Dockerfile Dockerfile.hf; then
+  echo "[deploy] syncing literal Dockerfile ← Dockerfile.hf"
+  cp Dockerfile.hf Dockerfile
+  git add Dockerfile
+  git commit -m "deploy(space): sync literal Dockerfile with Dockerfile.hf" >/dev/null
+fi
+
 echo "[deploy] pushing ${BRANCH} → ${REMOTE}/main…"
 git push "${REMOTE}" "${BRANCH}:main"
 
