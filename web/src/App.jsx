@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { sendChat } from "./api.js";
 
+// These MUST mirror the plan-cache seed set (data/seed_plan_cache.py) so every
+// one-click suggestion is a cache hit that replays in ~3s — instant on the free
+// CPU Space, instead of a multi-minute tiny-model cold path. Reword either list
+// and you reintroduce a slow first impression (the cache uses a 0.90 similarity
+// threshold, so a paraphrase misses). Keep the two in lockstep.
 const SUGGESTIONS = [
-  "Which 5 customers have the most overdue money?",
+  "Who are the top 10 customers by overdue balance?",
   "What is our current DSO?",
-  "Which overdue accounts should go on credit hold, and what's the rule?",
+  "Show me the total overdue amount by aging bucket.",
+  "What does our policy say about credit holds?",
 ];
 
 export default function App() {

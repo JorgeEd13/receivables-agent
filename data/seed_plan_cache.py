@@ -22,6 +22,11 @@ from __future__ import annotations
 # Representative of what a reviewer actually types at the demo: the aging / DSO /
 # top-overdue / policy questions people ask of a receivables agent. Kept close to
 # the golden set so the seeded plans are the ones most likely to be hit.
+#
+# The UI's one-click SUGGESTIONS (web/src/App.jsx) MUST be a subset of these exact
+# strings, so every suggested question is a cache hit that replays in ~3s on the
+# free CPU Space. Keep the two lists in lockstep (a paraphrase misses the 0.90
+# similarity threshold and falls through to the slow tiny model).
 SEED_QUESTIONS: list[str] = [
     "How many customers are in the ledger?",
     "What is our current DSO?",
