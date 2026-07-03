@@ -13,6 +13,18 @@ here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number**
 notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
 better model" delta); everything else for the live link is done.
 
+> **2026-07-03 — Cached questions now hit MID-CONVERSATION + scroll no longer yanks
+> (VERIFIED LIVE).** Live transcript showed a curated question worked only as the FIRST
+> message: `_try_cache` bailed on `len(messages) != 1`, so every suggested question clicked
+> AFTER an answer carried history → bypassed the cache → slow model → recursion limit
+> ("Sorry, need more steps"). Fix: look up the **latest** user question regardless of history
+> (a cached plan is self-contained, ADR-009; a real follow-up won't clear 0.90, so it still
+> falls to the LLM). Warming stays single-turn. Also: chat auto-scrolled on every tick →
+> yanked a reader down; now only scrolls when already near the bottom. **Verified LIVE:** three
+> curated Qs in a row, each WITH accumulating history, all `cached=True` in 1.0–1.5 s. Tests:
+> known-Q hits after prior turns; novel follow-up still → LLM. **Suite 118.** (`deploy_space.sh`
+> now requires explicit commit SHAs — auto-detect is unsafe on the LFS-rewritten space-deploy.)
+>
 > **2026-07-03 — Tiny-model prompt/routing/recursion (ADR-013) + UI quick-bar — VERIFIED
 > LIVE.** From browser testing: a novel "which 5 customers have the most overdue money?"
 > over-called `search_policy`, looped, thrashed ~250 s, then "did not return an answer".
