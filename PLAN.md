@@ -220,6 +220,125 @@ orchestration and killing the "Ollama-in-Docker unsupported" gotcha. (The heavie
 IaC/managed-cloud rungs — Cloud Run + managed DB — are already owned and largely shipped
 by the sibling `forge-pdm-mlops`; no need to duplicate them here.)
 
+### Phase 8 — Agent reliability at the tiny-model budget ceiling  ⏳ (planned — next sessions)
+
+**Read ADR-013 + ADR-009 first — this phase IMPROVES existing seams, it does NOT add them.**
+What already exists (do not re-implement): (a) a **graceful recursion ceiling** — `CachedAgent.astream`
+catches `GraphRecursionError` and yields a graceful answer (`src/agent/cached_agent.py`, ADR-013);
+(b) a **deliberately low cap** `agent_recursion_limit=8` — chosen in ADR-013 *specifically* to fail an
+unproductive loop in seconds instead of the **200–250 s thrash** the LangGraph default (25) caused.
+**Re-examined 2026-07-04 (Jorge's point):** the cap of 8 conflates *two* concerns — a **loop guard**
+(stop a degenerate cycle) and a **wait guard** (don't make the user wait). The 200–250 s thrash was bad
+not only because it was *long* but because it was **silent and ended in no answer**. So the honest
+refinement is **not** "keep 8 forever" nor "blindly raise it" — it is: *a narrated, progress-visible
+wait with a guaranteed final answer is tolerable*, which lets the step cap rise **when paired with 8.5
+(progress narration) + 8.2 (dedup, so the extra steps are productive) + 8.3 (forced finalization, so it
+always ends in an answer)**. Raising the cap **alone** would just re-create the silent thrash — that is
+the part that stays wrong. See 8.5. (c) a **semantic
+plan-cache** for *successful* runs that replays them for repeat questions (ADR-009); (d) a compact
+tiny-model prompt + one firm routing rule (ADR-013) and grammar-constrained tool-calls (ADR-011).
+
+**Observed behavior (the motive — this is *why* the phase exists, not a guess):** on novel typed
+questions the free-CPU tiny model still (i) **over-calls tools** — ADR-013 documents it calling *both*
+`query_ledger` and `search_policy` when the policy is irrelevant, then looping — so it **burns the
+8-step budget on redundant/repeated calls** and hits the ceiling *without ever answering*; and (ii) when
+it hits the ceiling, the graceful message is **generic and dead-ends** — *"couldn't finish on the
+free-tier tiny model — try an example or rephrase"* — which surfaces **nothing it actually found** and,
+in Jorge's words, "reads as 'I just don't work for no apparent reason.'" The goal: **fewer wasted cycles
+(so the same 8-cap goes further) + a far more useful outcome when the cap is still hit.**
+
+**What we will do (each with its reason; NONE of these is "raise the limit" or "add a ceiling"):**
+
+- **8.1 — A richer graceful answer instead of the canned apology.** *Why:* the current message throws
+  away the partial work. *Fix:* on hitting the ceiling, spend the reply surfacing **what it did gather**
+  (the tools it ran, any partial `query_ledger` result) **+ one specific, narrowed next step** ("I pulled
+  the overdue list but didn't rank it — ask me to sort by amount"), not a generic "rephrase." Needs the
+  partial run state (see 8.4's checkpointer).
+- **8.2 — Redundant-call short-circuit / loop-dedup.** *Why:* the exact ADR-013 failure is *wasted*
+  steps (calling both tools, or re-calling the same tool with the same args). *Fix:* detect a repeated
+  identical tool call (and the "called `search_policy` on a pure-data question" over-call) and
+  short-circuit it — return the prior result and nudge "you already have this; now answer or try a
+  *different* action." **This is what actually buys "more possibilities on a tiny model" (Jorge's goal):
+  not a bigger budget, but not squandering the budget we have** — fully consistent with ADR-013's
+  fail-fast philosophy.
+- **8.3 — Budget-aware forced finalization (turn the hard error into a real answer).** *Why:* hitting
+  `GraphRecursionError` means *no* answer was produced; catching it after the fact can only apologize.
+  *Fix:* track step count in graph state and at `steps == limit − 1` **route to a `finalize` node** that
+  forces "answer from what you have, and state the gap honestly" *instead of* another tool call — so the
+  last cycle produces a best-effort partial answer rather than an exception. This is the honest form of
+  Jorge's "use the last of its resources to conclude."
+- **8.4 — A "continue" affordance via LangGraph's checkpointer (the honest form of "cache & resume").**
+  *Why:* Jorge's instinct — "cache the run conclusions so it can return and run again without losing
+  itself" — is right in goal, and LangGraph **already provides thread-level state persistence** (a
+  checkpointer + `thread_id`), so we *use* that rather than hand-rolling a cache. *Fix:* give each
+  conversation a `thread_id` + a persistent checkpointer so a follow-up message **continues the same
+  thread with all prior context** (distinct from the ADR-009 plan-cache, which replays *finished*
+  successful runs). **Honest caveat to preserve for future-me:** *blindly auto-re-running* a tiny model
+  that just looped will **re-loop on the same novel question** (ADR-013's evidence) — so "resume" only
+  helps when paired with 8.2 (dedup) + 8.3 (finalization); it is a *user-driven continue*, not an
+  automatic replay of a failed run.
+
+- **8.5 — Progress narration → a *tolerable* longer wait, so the cap can rise (Jorge's 2026-07-04
+  insight, the reframe that ties the phase together).** *Why:* ADR-013 cut the cap to 8 to avoid a
+  **silent** 200–250 s wait that ended in nothing — but the wait was intolerable because it was
+  *invisible*, not merely because it was *long*. If the agent **narrates its progress** as it works —
+  *"Looking up the overdue ledger… found 12 overdue accounts, now checking the late-fee policy…"* —
+  then a longer, genuinely-productive run becomes acceptable, and we stop **cutting off questions that
+  just needed a few more steps**. *Fix:* stream a short human-readable **intent/finding line per step**,
+  not just the tool name. **What already exists:** `CachedAgent.astream` already emits an SSE `tool`
+  event per `on_tool_start` (the "watch it think" streaming, ADR-012) — so the pipe is there; 8.5
+  *upgrades* it from "using `query_ledger`" to a templated intent line derived from the tool + its args
+  (and, where the model's ReAct "thought" is clean enough, a distilled version of it). **Then raise the
+  step cap** to a higher, tuned ceiling for this narrated path (e.g. 8 → ~15–20), safe because 8.2 keeps
+  the extra steps productive and 8.3 guarantees a final answer. **Add a separate wall-clock budget
+  (honest engineering nuance):** on a 2-vCPU box "tolerable wait" is really about *seconds*, and the
+  step cap is a clumsy proxy for time. Split the two concerns ADR-013 fused — a **step cap** as the loop
+  guard and a **soft wall-clock budget** ("if we've spent > N s, narrate that and finalize now, 8.3") as
+  the wait guard. Narration keeps those seconds engaging instead of dead. **Honest caveat to preserve:**
+  narration does *not* fix a true degenerate loop — narrating "looking for X… looking for X…" is honest
+  but still not an answer; that is exactly why 8.5 is only safe *with* 8.2 (dedup breaks/short-circuits
+  the loop) and 8.3 (finalization ends it). 8.5 is the **framing** of the phase; 8.2/8.3 are what make it
+  safe.
+
+**DoD.** A question that previously hit the ceiling now: (a) **narrates its progress** step by step
+(8.5) so a longer run is visible, not a frozen spinner; (b) is allowed **more productive steps** (raised
+step cap) *and* is bounded by a **soft wall-clock budget** that triggers a graceful finalize; (c) ends in
+either a finalized partial answer naming what it found + the gap (8.1/8.3) or a faster settle because a
+redundant call was short-circuited (8.2); a follow-up continues the thread with context (8.4). The
+**silent** thrash must not return — a raised cap is only shipped together with narration + dedup +
+finalization; verify the worst case (a true loop) still ends in a narrated finalize within the wall-clock
+budget, never a bare error or dead air. Offline tests cover the dedup, the boundary finalization, the
+per-step narration events, and the wall-clock finalize. New ADR-014 (references ADR-013/012/009).
+Showcase framing: *"I made a tiny model degrade gracefully — it narrates what it's doing, doesn't waste
+cycles, and always ends in an answer — instead of freezing then apologizing,"* a strong, honest
+AI-reliability story.
+
+### Phase 9 — Demo product-polish: theme + internationalization (i18n) + friendlier UX  ⏳ (planned)
+
+**Why (observed):** the React chat UI (`web/`) is **single-theme and English-only** (one `web/src/styles.css`,
+no locale layer) — Jorge's note: "both demos have only one language and one theme; testers looking for
+variety and versatility deserve better." This is also a deliberate **front-end/product showcase** play
+(a strong-but-underexplored axis). **Paired with the sibling `forge-pdm-mlops` F9** (same theme + i18n
+work on its `/demo`) so the two public demos share a design language — do them close together.
+
+**What we will do:**
+- **9.1 — Light/dark theme.** A theme toggle that is **theme-aware** (honours `prefers-color-scheme` as
+  the default signal, plus a manual toggle that persists). *Why:* first impression + accessibility; cheap,
+  high-polish signal.
+- **9.2 — Internationalization (i18n), EN + PT-BR at least.** A **lightweight** locale layer (a small
+  string dictionary + a context/hook — no heavy i18n framework needed for two locales), a language toggle,
+  and translated UI chrome + the seeded example questions. *Why:* versatility for a broader tester pool;
+  Jorge works bilingually. **Honesty note to preserve:** the **agent's answers** come from the model and
+  the (English) policy corpus — i18n covers the **UI shell + examples**, not on-the-fly translation of
+  model output (that would be a separate, larger claim; call it out, don't silently imply it).
+- **9.3 — (optional) friendlier chat affordances** — clearer streaming/typing states, a plain-language
+  one-liner on what the agent can do, tidier example-question chips.
+
+**DoD.** Theme toggle works in both schemes and persists; the UI + example questions render in EN and
+PT-BR via the toggle; the honesty boundary (UI-localized ≠ answer-translated) is stated in the UI/README;
+no regression to the streaming/plan-cache paths. ADR-015 if a non-obvious choice is made (e.g., the i18n
+approach). Coordinate the visual language with `forge-pdm-mlops` F9.
+
 ## MVP cut
 
 Phases 0–4 plus a lightweight Phase 5. The MCP server, the skill and the

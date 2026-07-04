@@ -13,6 +13,20 @@ here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number**
 notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
 better model" delta); everything else for the live link is done.
 
+**NEW PHASES SCOPED 2026-07-04 (see PLAN.md — not started):** **Phase 8 — agent reliability
+at the tiny-model budget ceiling** (IMPROVE the existing ADR-013 graceful ceiling, do NOT add
+one). Motive: observed the tiny model burning its 8-step budget on redundant tool calls then
+dead-ending on a generic apology that "reads as 'I just don't work'." Fixes: richer partial
+answer + redundant-call dedup + budget-aware forced finalization + `thread_id`/checkpointer
+"continue" affordance + **progress narration (Jorge's insight)**. Key reframe: the cap of 8 fused
+a *loop guard* and a *wait guard* — the 200–250s thrash was bad because it was **silent + answerless**,
+not merely long; so **narrating progress lets the cap RISE safely** (paired with dedup so extra steps
+are productive + forced finalization so it always answers), plus split off a **soft wall-clock budget**
+as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent thrash). **Phase 9
+— demo product-polish** (light/dark theme + EN/PT-BR i18n on the React UI; paired with
+`forge-pdm-mlops` F9). Both scoped from Jorge's 2026-07-04 review; ADR-014 (Phase 8) / ADR-015
+(Phase 9) when built.
+
 > **2026-07-03 — Cached questions now hit MID-CONVERSATION + scroll no longer yanks
 > (VERIFIED LIVE).** Live transcript showed a curated question worked only as the FIRST
 > message: `_try_cache` bailed on `len(messages) != 1`, so every suggested question clicked
