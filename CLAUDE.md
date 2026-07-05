@@ -28,7 +28,8 @@ patterns from scratch and contains no proprietary code or data.
 - `data/`            — synthetic data generator + the policy document for RAG
 - `src/agent/`       — LangGraph graph, tools (guarded SQL, policy search), providers,
                        plan-cache (`plan_cache` / `plan_replay` / `cached_agent`, ADR-009),
-                       grammar-constrained tool-calls for tiny models (`constrained.py`, ADR-011)
+                       grammar-constrained tool-calls for tiny models (`constrained.py`, ADR-011),
+                       turn-scoped dedup + graceful finalization (`turn_control.py`, ADR-014)
 - `src/rag/`         — ChromaDB indexer + embeddings
 - `src/api/`         — FastAPI app (lifespan, auth, routes)
 - `src/core/`        — config + Pydantic schemas + hardware-aware model

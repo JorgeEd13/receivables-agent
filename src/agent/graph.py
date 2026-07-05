@@ -20,6 +20,7 @@ from src.agent.plan_cache import get_plan_cache
 from src.agent.providers import build_chat_model, has_credentials
 from src.agent.schema_hints import SCHEMA_HINTS, SCHEMA_HINTS_BRIEF
 from src.agent.tools import make_query_ledger_tool, make_search_policy_tool
+from src.agent.turn_control import ToolCallTracker
 from src.core.config import Settings, get_settings
 from src.agent.ledger import connect_readonly
 from src.rag.embeddings import default_embedding_function
@@ -122,9 +123,13 @@ def build_agent(
     con = con or connect_readonly(settings.ledger_path)
     policy = ensure_policy_index(settings)
 
+    # One tracker per agent: wraps both tools so a repeated tool call is de-duped
+    # and every call is recorded for a graceful finalization (ADR-014). Per-turn
+    # isolation comes from its ContextVar, so the process-wide shared agent is safe.
+    tracker = ToolCallTracker()
     tools = [
-        make_query_ledger_tool(con, settings.max_rows),
-        make_search_policy_tool(policy, settings.search_k),
+        make_query_ledger_tool(con, settings.max_rows, wrap=tracker.wrap),
+        make_search_policy_tool(policy, settings.search_k, wrap=tracker.wrap),
     ]
     model = build_dynamic_model(settings, tools)
     agent = create_react_agent(model, tools=tools, prompt=select_prompt(settings))
@@ -151,4 +156,7 @@ def build_agent(
         max_rows=settings.max_rows,
         search_k=settings.search_k,
         recursion_limit=settings.agent_recursion_limit,
+        narrated_step_cap=settings.agent_narrated_step_cap,
+        wall_clock_budget_s=settings.agent_wall_clock_budget_s,
+        tracker=tracker,
     )

@@ -5,6 +5,131 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-014 — Graceful ceiling: dedup, finalization, narration + wall-clock budget (Phase 8)
+
+**Status:** Accepted · 2026-07-05
+
+> Built in two slices, same day. **Slice 1** — tool-call dedup (8.2) + forced
+> finalization (8.1/8.3). **Slice 2** — progress narration + a raised narrated step
+> cap split from a soft wall-clock budget (8.5), and the decision to treat the
+> "continue" affordance (8.4) as satisfied-by-design. Both are recorded below.
+
+### Slice 2 — narration + the step/time split (8.5), and why no checkpointer (8.4)
+
+**Context.** Slice 1 stopped a ceiling-hit from dead-ending, but the ADR-013 step
+cap (8) was a **clumsy proxy for "don't make them wait."** Its real sin was a
+*silent* wait ending in nothing — not merely a long one. Two consequences: good
+questions that just needed a few more steps were cut off, and the single cap
+conflated a **loop guard** (stop a degenerate cycle) with a **wait guard** (don't
+make the user wait).
+
+**Decision.**
+- **Progress narration (8.5).** `turn_control.narrate_start` / `narrate_end` turn
+  each tool call into a human line — an intent ("Checking the collections policy on
+  '…'") on `on_tool_start` and a finding ("Found 12 rows in the ledger") on
+  `on_tool_end` — streamed as a new `step` SSE event the UI renders live (coalescing
+  repeats). This upgrades ADR-012's bare "using query_ledger" tool event into a
+  readable running commentary, so a longer run *looks* productive instead of frozen.
+- **Split the one cap into two guards.** The **silent** path (`invoke`/`ainvoke`)
+  keeps the tight ADR-013 loop guard (`agent_recursion_limit`, 8) — no narration, so
+  a long wait still reads as hung. The **narrated** streaming path (`astream`) gets a
+  **higher step cap** (`agent_narrated_step_cap`, 16) as its loop guard **plus** a
+  **soft wall-clock budget** (`agent_wall_clock_budget_s`, 45 s) as the wait guard:
+  past the budget it narrates a wrap-up and finalizes (8.3) from what it has. Raising
+  the cap is safe **only** because it ships together with narration + dedup (cheap
+  repeats) + finalization (always an answer); a raised cap *alone* would recreate the
+  silent thrash — that's the part that would stay wrong. The clock is injectable so
+  tests don't fight the asyncio loop's own `time.monotonic`.
+
+**Why 8.4 (a checkpointer "continue") is not built.** The plan scoped a LangGraph
+checkpointer + `thread_id` so a follow-up continues with prior context. But the API
+**already resends the full conversation history every turn** (`/api/chat` +
+`/api/chat/stream`), so a follow-up *already* carries context — and slice 1's
+finalization ends with a **narrowed next-step invite** ("ask me to sort by amount")
+that makes that continue useful. A server-side checkpointer on top of history-resend
+would **double-count** the conversation. So 8.4's user goal is met by the existing
+stateless-history contract; a checkpointer is deferred as an unnecessary (and
+conflicting) optimization for this design, not shipped as dead machinery.
+
+**Consequences.** A question that previously hit the ceiling now narrates its
+progress, is allowed more productive steps bounded by a visible time budget, and
+always ends in a finalized answer naming what it found + the gap — the honest
+"I made a tiny model degrade gracefully" story, end to end. The step cap is no
+longer asked to mean two things at once. Verified offline (narration lines; the
+`step` events on a normal run; the wall-clock early-finalize via an injected clock);
+the live tiny-model behaviour is confirmed on the Space (the tiny-CPU loop can't run
+cheaply locally), as with ADR-013's streaming.
+
+---
+
+### Slice 1 — dedup + forced finalization (8.1/8.2/8.3)
+
+**Status:** Accepted · 2026-07-05
+
+### Context
+
+ADR-013 gave the free-CPU tiny model a low step cap (8) and a graceful
+`GraphRecursionError` catch so a loop fails in seconds, not the old 200–250 s
+thrash. But live use showed two residual problems on **novel typed questions**:
+
+- The tiny model **re-issues the same tool call** (or over-calls `search_policy`
+  on a pure-data question), **burning its small step budget on work it already
+  did** — so it hits the cap without ever answering.
+- When it hits the cap, the graceful message is **generic and dead-ends**
+  (*"couldn't finish — try an example or rephrase"*): it throws away whatever the
+  agent *did* gather, so it "reads as 'I just don't work for no apparent reason.'"
+
+This is the first slice of Phase 8. It **improves** the ADR-013 seam; it does not
+add a second ceiling or raise the cap. (Narration + the raised narrated cap +
+wall-clock budget (8.5) land in slice 2 above; the "continue" affordance (8.4) is
+handled there too — met by the existing history-resend contract.)
+
+### Decision
+
+A **turn-scoped control layer** (`src/agent/turn_control.py`), wired by wrapping
+the two tools in `build_agent` and driven by `CachedAgent`:
+
+1. **Dedup / redundant-call short-circuit (8.2).** `ToolCallTracker.wrap`
+   decorates each tool so an **identical** call within one turn (args normalized
+   only for whitespace — case preserved, so different literals never collide)
+   returns the **memoized** result plus a firm nudge ("you already have this —
+   answer now"), *without re-executing*. It doesn't lower the step count, but it
+   stops paying for the same query twice and pushes the model to finalize —
+   "not a bigger budget, but not squandering the budget we have."
+2. **Forced finalization (8.1 + 8.3).** The tracker records every
+   `(tool, args, result)` of the turn. On a ceiling hit, `finalize_answer`
+   composes a **deterministic** best-effort answer from those observations — the
+   most recent *successful* ledger query (errors/rejections don't count as
+   gathered facts) and/or a policy finding, plus the specific gap and a narrowed
+   next step ("I pulled the overdue list but didn't rank it — ask me to sort by
+   amount") — instead of the canned apology. No extra LLM call: the partial work
+   is surfaced, not re-reasoned. With nothing usable gathered it returns the
+   honest no-progress message (the ADR-013 floor). Wired into **all three** ceiling
+   paths — `invoke`/`ainvoke` (which previously *raised*) and `astream`.
+3. **Concurrency.** The agent is built once and shared across requests
+   (`app.state`), so turn state lives in a **`ContextVar`** (`begin()` installs a
+   fresh state per turn); concurrent requests never cross-contaminate, and outside
+   a turn the wrapper is a transparent pass-through (tools stay unit-testable).
+
+### Consequences
+
+- A ceiling-hitting question now ends in a **useful partial answer naming what it
+  found + the gap**, and a repeated tool call is served from memo with a nudge —
+  the "reads as broken" first impression is fixed without touching the cap.
+- **Honesty preserved:** finalization renders only what a tool actually returned
+  (no fabricated numbers), and errored/guard-rejected queries are never presented
+  as facts. It complements — doesn't touch — the ADR-009 plan-cache (which replays
+  *successful* runs).
+- **Verification:** the seams are exercised offline via a looping stub agent that
+  calls the wrapped tool then raises `GraphRecursionError`, through both `invoke`
+  and `astream` (`tests/test_turn_control.py`, 12). Live behaviour on the tiny
+  model is confirmed on the Space (the tiny-CPU loop can't run cheaply locally),
+  as with ADR-013's streaming.
+- Strong/cloud models are unaffected — they rarely loop, and dedup only fires on a
+  genuine exact repeat.
+
+---
+
 ## ADR-013 — Tiny-model prompt, firm tool-routing, and a low recursion cap
 
 **Status:** Accepted · 2026-07-03

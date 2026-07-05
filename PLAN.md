@@ -220,7 +220,28 @@ orchestration and killing the "Ollama-in-Docker unsupported" gotcha. (The heavie
 IaC/managed-cloud rungs — Cloud Run + managed DB — are already owned and largely shipped
 by the sibling `forge-pdm-mlops`; no need to duplicate them here.)
 
-### Phase 8 — Agent reliability at the tiny-model budget ceiling  ⏳ (planned — next sessions)
+### Phase 8 — Agent reliability at the tiny-model budget ceiling  ✅ (SHIPPED 2026-07-05, ADR-014)
+
+**DONE (2026-07-05, ADR-014).** All of Phase 8 shipped in two same-day slices; **suite 134 green**.
+New `src/agent/turn_control.py` + wiring in `tools.py` / `graph.py` / `cached_agent.py` / `web/`;
+`tests/test_turn_control.py` (16, offline).
+- **8.2 — redundant-call dedup.** `ToolCallTracker.wrap` memoizes an identical tool call within a
+  turn (whitespace-normalized, case-preserved) → returns the prior result + a firm nudge, no
+  re-execution. State lives in a `ContextVar` (concurrency-safe under the process-wide shared agent).
+- **8.1/8.3 — forced finalization.** On the ceiling, `finalize_answer` composes a deterministic
+  partial answer from the recorded observations (latest *successful* ledger query + policy finding +
+  the gap + a narrowed next step) instead of the canned apology. Wired into `invoke`/`ainvoke`
+  (previously *raised*) **and** `astream`.
+- **8.5 — narration + the step/time split.** `narrate_start`/`narrate_end` stream a human `step`
+  line per tool start/end (UI renders it live). The **silent** path keeps the tight cap (8); the
+  **narrated** streaming path gets a higher cap (16) **plus** a soft wall-clock budget (45 s) that
+  narrates a wrap-up and finalizes — the honest split of ADR-013's one cap into a loop guard + a wait
+  guard. Cap raised only *with* narration + dedup + finalization.
+- **8.4 — "continue" affordance: satisfied-by-design, no checkpointer.** The API already resends full
+  history per turn, so a follow-up carries prior context, and 8.1's next-step invite makes it useful;
+  a LangGraph checkpointer would *double-count* history. Recorded as a decision in ADR-014, not built.
+
+**Original scoping below (kept for the record).**
 
 **Read ADR-013 + ADR-009 first — this phase IMPROVES existing seams, it does NOT add them.**
 What already exists (do not re-implement): (a) a **graceful recursion ceiling** — `CachedAgent.astream`

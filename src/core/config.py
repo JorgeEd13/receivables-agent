@@ -52,10 +52,20 @@ class Settings(BaseSettings):
     constrained_tool_calls: Literal["auto", "on", "off"] = "auto"
     constrained_quality_max: int = Field(default=3, ge=1, le=10)
 
-    # Max ReAct steps before the agent gives up. Low by design: a tiny model that
-    # loops (query → policy → query …) should fail fast with a graceful message,
-    # not thrash for minutes. A well-behaved turn uses 1–2 tool calls (ADR-013).
+    # Max ReAct steps before the agent gives up on a *silent* (non-streaming) call.
+    # Low by design (ADR-013): with no live narration, a long wait reads as hung, so
+    # `invoke`/`ainvoke` keep the tight loop guard. A well-behaved turn uses 1–2 calls.
     agent_recursion_limit: int = Field(default=8, ge=2, le=50)
+
+    # The *narrated* streaming path (`astream`) may take more productive steps,
+    # because progress is visible and dedup keeps repeats cheap (ADR-014, 8.5). This
+    # is the loop guard for that path; the wall-clock budget below is the wait guard.
+    agent_narrated_step_cap: int = Field(default=16, ge=2, le=50)
+    # Soft wall-clock budget (seconds) for the narrated streaming path: once exceeded
+    # the agent narrates that it's wrapping up and finalizes from what it has, rather
+    # than spending the whole step cap. 0 disables the budget. (ADR-014, 8.5 — the
+    # honest split of ADR-013's step cap into a loop guard + a time-based wait guard.)
+    agent_wall_clock_budget_s: float = Field(default=45.0, ge=0.0)
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.0-flash"

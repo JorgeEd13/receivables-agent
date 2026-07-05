@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://jorgeed-receivables-agent.hf.space"><img src="https://img.shields.io/badge/live%20demo-try%20it-brightgreen?logo=huggingface&logoColor=white" alt="Live demo — try it"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-110%20passing-brightgreen" alt="110 tests">
+  <img src="https://img.shields.io/badge/tests-134%20passing-brightgreen" alt="134 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
@@ -41,8 +41,9 @@ policy**.
 > **Status: shipped + live.** The agent, the guarded SQL + RAG tools, the FastAPI
 > service (with **live SSE streaming** — watch the agent think), the React UI, the
 > one-command Docker run, the AI-native layer (MCP server + eval suite), a
-> **semantic plan-cache** and **hardware-aware / grammar-constrained** local models
-> are all implemented and tested (Phases 0–6, **118 tests**), and the whole thing is
+> **semantic plan-cache**, **hardware-aware / grammar-constrained** local models and
+> **graceful degradation at the step ceiling** (dedup + forced finalization +
+> narration) are all implemented and tested (**134 tests**), and the whole thing is
 > **deployed to a free, self-contained Hugging Face Space** running a tiny local model
 > (no API key). A public, clean-room portfolio project on 100% synthetic data. See
 > [`PLAN.md`](PLAN.md) for the roadmap, [`docs/DEPLOY.md`](docs/DEPLOY.md) for the
@@ -205,7 +206,7 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache (88 tests)
+pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (134 tests)
 ```
 
 ## AI-native layer
@@ -272,6 +273,34 @@ without hand-tuning. Two pieces make the local path do that automatically:
   only hold it back. `format` fixes the *structure*; SQL *quality* still scales
   with the model — which is the whole point: the architecture is reliable at 0.5B,
   and it *shines with a better model*.
+
+## Graceful degradation at the step ceiling
+
+A tiny model on a free CPU sometimes over-thinks a novel question — re-calling a
+tool it already ran, or burning its step budget without converging. The failure
+mode to avoid is the worst first impression: hitting the ceiling and dead-ending
+on a generic apology that *reads as "I just don't work."* Four seams
+([`src/agent/turn_control.py`](src/agent/turn_control.py), [ADR-014](docs/DECISIONS.md))
+make it degrade gracefully instead:
+
+- **Redundant-call dedup.** An identical tool call within a turn is served from a
+  per-turn memo with a firm nudge, never re-executed — *not a bigger budget, just
+  not squandering the budget it has.* (Turn state lives in a `ContextVar`, so the
+  one process-wide agent stays concurrency-safe.)
+- **Forced finalization.** If the loop still hits the ceiling, the agent answers
+  from **what it actually gathered** — the latest successful ledger query, a policy
+  finding, and the specific gap plus a narrowed next step ("I pulled the overdue
+  list but didn't rank it — ask me to sort by amount") — composed deterministically,
+  never a fabricated number, instead of the canned apology.
+- **Progress narration.** Each step streams a human line ("checking the collections
+  policy on…" → "found 12 rows in the ledger"), so a longer run is *visible and
+  productive*, not a frozen spinner.
+- **One cap split into two guards.** Narration makes a longer wait tolerable, so the
+  *silent* path keeps a tight step cap while the *narrated* streaming path gets a
+  higher cap **plus a soft wall-clock budget** — a loop guard (steps) and a wait
+  guard (seconds), instead of one number doing both jobs badly. The cap only rises
+  *because* it ships with dedup + finalization + narration; raising it alone would
+  just recreate a silent thrash.
 
 ## How this was built
 

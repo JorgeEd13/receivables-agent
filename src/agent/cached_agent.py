@@ -21,8 +21,9 @@ number is current even after the ledger changes.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import duckdb
 from chromadb.api.models.Collection import Collection
@@ -31,6 +32,12 @@ from src.agent.message_utils import final_text as _final_of
 from src.agent.message_utils import tools_used as _tools_used_of
 from src.agent.plan_cache import PlanCache, plan_from_messages
 from src.agent.plan_replay import ReplayError, ReplayResult, replay_plan
+from src.agent.turn_control import (
+    ToolCallTracker,
+    finalize_answer,
+    narrate_end,
+    narrate_start,
+)
 
 # Streaming event vocabulary (see `astream`): the API turns each dict into one SSE
 # event so the UI can show live progress. Kept tiny and stable.
@@ -38,6 +45,19 @@ from src.agent.plan_replay import ReplayError, ReplayResult, replay_plan
 #   {"type": "tool",   "name": "query_ledger"} — the agent invoked a tool
 #   {"type": "answer", "reply": str, "tools_used": [str]} — the final answer
 #   {"type": "error",  "message": str}         — the turn failed
+
+
+def _tool_output_text(output: Any) -> str | None:
+    """Best-effort extraction of a tool's string result from an astream event.
+
+    ``on_tool_end`` carries the tool's return as either the raw string our tools
+    produce or a ``ToolMessage``-like object with a ``.content``. Narration is
+    cosmetic, so anything unexpected degrades to ``None``.
+    """
+    if output is None:
+        return None
+    content = getattr(output, "content", output)
+    return content if isinstance(content, str) else None
 
 
 def _last_user_message(messages: list[dict[str, Any]]) -> str | None:
@@ -82,6 +102,10 @@ class CachedAgent:
         max_rows: int,
         search_k: int,
         recursion_limit: int = 8,
+        narrated_step_cap: int | None = None,
+        wall_clock_budget_s: float = 0.0,
+        tracker: ToolCallTracker | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._agent = agent
         self._cache = cache
@@ -89,26 +113,65 @@ class CachedAgent:
         self._policy = policy
         self._max_rows = max_rows
         self._search_k = search_k
-        # Cap ReAct steps so a looping tiny model fails fast (ADR-013).
+        # The turn tracker wrapping the tools (dedup + observation log, ADR-014).
+        # Optional so tests can construct a bare CachedAgent; when absent,
+        # finalization degrades to the honest no-progress message.
+        self._tracker = tracker
+        # Silent (non-streaming) path: a tight loop guard so a long wait never reads
+        # as hung (ADR-013).
         self._config = {"recursion_limit": recursion_limit}
+        # Narrated streaming path (ADR-014, 8.5): a higher step cap — safe because
+        # progress is visible + dedup keeps repeats cheap — bounded by a soft
+        # wall-clock budget (the wait guard). Defaults to the silent cap if unset.
+        self._stream_config = {
+            "recursion_limit": narrated_step_cap or recursion_limit
+        }
+        self._wall_clock_budget_s = wall_clock_budget_s
+        # Injectable monotonic clock (tests supply a fake; patching the global
+        # `time.monotonic` would collide with the asyncio event loop's own use).
+        self._clock = clock or time.monotonic
+
+    def _begin_turn(self) -> None:
+        """Install a fresh tracker state for this turn (before driving the agent)."""
+        if self._tracker is not None:
+            self._tracker.begin()
+
+    def _finalized(self, question: str | None) -> str:
+        """A graceful partial answer from what the turn gathered (ADR-014)."""
+        observations = self._tracker.observations() if self._tracker else []
+        return finalize_answer(observations, question)
 
     # --- the interface the app/evals call -------------------------------- #
 
     def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from langgraph.errors import GraphRecursionError
+
         messages = payload["messages"]
         hit = self._try_cache(messages)
         if hit is not None:
             return hit
-        result = self._agent.invoke(payload, config=self._config)
+        self._begin_turn()
+        try:
+            result = self._agent.invoke(payload, config=self._config)
+        except GraphRecursionError:
+            # Ceiling hit: finalize from what the turn gathered instead of raising
+            # (ADR-014). The partial run isn't cacheable, so we don't warm.
+            return self._finalized_messages(messages)
         self._warm(messages, result["messages"])
         return result
 
     async def ainvoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from langgraph.errors import GraphRecursionError
+
         messages = payload["messages"]
         hit = self._try_cache(messages)
         if hit is not None:
             return hit
-        result = await self._agent.ainvoke(payload, config=self._config)
+        self._begin_turn()
+        try:
+            result = await self._agent.ainvoke(payload, config=self._config)
+        except GraphRecursionError:
+            return self._finalized_messages(messages)
         self._warm(messages, result["messages"])
         return result
 
@@ -117,9 +180,12 @@ class CachedAgent:
 
         On a **cache hit** we emit a ``cached`` marker, one ``tool`` event per tool
         the replay used, then the final ``answer`` — fast, no LLM. On a **miss** we
-        stream the wrapped agent's real step events (a ``tool`` event as each tool
-        starts) and finish with the ``answer`` once the loop ends, warming the cache.
-        Any failure surfaces as an ``error`` event rather than a broken stream.
+        stream the wrapped agent's real step events — a ``tool`` event and a human
+        ``step`` narration line as each tool starts / ends (ADR-014, 8.5) — and
+        finish with the ``answer`` once the loop ends, warming the cache. A **soft
+        wall-clock budget** (the wait guard) finalizes early from what's gathered if
+        the run runs long; the ceiling (loop guard) finalizes the same way. Any
+        failure surfaces as an ``error`` event rather than a broken stream.
         """
         messages = payload["messages"]
         hit = self._try_cache(messages)
@@ -131,37 +197,66 @@ class CachedAgent:
             yield {"type": "answer", "reply": _final_of(out), "tools_used": _tools_used_of(out)}
             return
 
-        # Miss: stream the real ReAct loop. `astream_events` surfaces a
-        # `on_tool_start` per tool call; the final state carries the answer.
+        # Miss: stream the real ReAct loop. `astream_events` surfaces
+        # `on_tool_start` / `on_tool_end` per tool call; the final state carries the
+        # answer. We run it on the *narrated* config (a higher step cap) and bound it
+        # with a soft wall-clock budget.
         from langgraph.errors import GraphRecursionError
 
+        self._begin_turn()
+        question = _last_user_message(messages)
+        deadline = (
+            self._clock() + self._wall_clock_budget_s
+            if self._wall_clock_budget_s > 0
+            else None
+        )
         final_messages: list[Any] | None = None
         seen: set[str] = set()
         try:
             async for event in self._agent.astream_events(
-                payload, version="v2", config=self._config
+                payload, version="v2", config=self._stream_config
             ):
                 kind = event.get("event")
                 if kind == "on_tool_start":
                     name = event.get("name", "")
-                    if name and name not in seen:
-                        seen.add(name)
-                        yield {"type": "tool", "name": name}
+                    if name:
+                        if name not in seen:
+                            seen.add(name)
+                            yield {"type": "tool", "name": name}
+                        args = (event.get("data") or {}).get("input") or {}
+                        yield {"type": "step", "text": narrate_start(name, args)}
+                elif kind == "on_tool_end":
+                    name = event.get("name", "")
+                    if name:
+                        result = _tool_output_text((event.get("data") or {}).get("output"))
+                        yield {"type": "step", "text": narrate_end(name, result)}
                 elif kind == "on_chain_end":
                     data = event.get("data", {}) or {}
                     output = data.get("output")
                     if isinstance(output, dict) and "messages" in output:
                         final_messages = output["messages"]
+
+                # Soft wall-clock budget (8.5): a *visible* long run is fine, but past
+                # the budget we stop spending steps and finalize from what we have —
+                # narrated, never a silent stall or a bare timeout.
+                if deadline is not None and self._clock() > deadline:
+                    yield {
+                        "type": "step",
+                        "text": "This is taking a while — wrapping up with what I have so far…",
+                    }
+                    yield {
+                        "type": "answer",
+                        "reply": self._finalized(question),
+                        "tools_used": sorted(seen),
+                    }
+                    return
         except GraphRecursionError:
-            # The tiny model looped without converging (over-calling tools). Fail
-            # gracefully with an honest, actionable answer instead of thrashing.
+            # The tiny model looped without converging (over-calling tools). Instead
+            # of a canned apology, finalize from what the turn actually gathered
+            # (ADR-014): name the partial ledger/policy findings + the specific gap.
             yield {
                 "type": "answer",
-                "reply": (
-                    "I couldn't finish this one on the free-tier tiny model — it went "
-                    "back and forth without settling on an answer. Try one of the "
-                    "example questions (they're instant), or rephrase this more simply."
-                ),
+                "reply": self._finalized(question),
                 "tools_used": sorted(seen),
             }
             return
@@ -180,6 +275,29 @@ class CachedAgent:
         }
 
     # --- internals ------------------------------------------------------- #
+
+    def _finalized_messages(self, inbound: list[dict[str, Any]]) -> dict[str, Any]:
+        """Shape a ceiling finalization like a finished turn (for invoke/ainvoke).
+
+        Mirrors ``_replay_as_messages``: one synthetic tool-call message per tool
+        the turn used (so ``tools_used`` extraction still works) + the finalized
+        answer built from the recorded observations (ADR-014).
+        """
+        observations = self._tracker.observations() if self._tracker else []
+        question = _last_user_message(inbound)
+        used: list[str] = []
+        for obs in observations:
+            if obs.tool not in used:
+                used.append(obs.tool)
+        tool_turns = [
+            SimpleNamespace(
+                content="",
+                tool_calls=[{"name": name, "args": {}, "id": f"final-{i}"}],
+            )
+            for i, name in enumerate(used)
+        ]
+        final = SimpleNamespace(content=self._finalized(question), tool_calls=[])
+        return {"messages": inbound + tool_turns + [final]}
 
     def _try_cache(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Return a replayed-turn dict on a usable cache hit, else ``None``.

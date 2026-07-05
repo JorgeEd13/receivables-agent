@@ -13,9 +13,12 @@ here). README carries the live link. **NEXT — Layer 4: tiny-vs-STRONG number**
 notebook GPU (run `evals.run` + one latency vs a strong model for the "shines with a
 better model" delta); everything else for the live link is done.
 
-**NEW PHASES SCOPED 2026-07-04 (see PLAN.md — not started):** **Phase 8 — agent reliability
-at the tiny-model budget ceiling** (IMPROVE the existing ADR-013 graceful ceiling, do NOT add
-one). Motive: observed the tiny model burning its 8-step budget on redundant tool calls then
+**Phase 8 — agent reliability at the tiny-model budget ceiling — ✅ SHIPPED 2026-07-05 (ADR-014).**
+All of it, two same-day slices, **suite 134 green**: dedup (8.2) + forced finalization (8.1/8.3) +
+progress narration with a raised narrated cap split from a soft wall-clock budget (8.5); the
+"continue" affordance (8.4) is satisfied-by-design (history-resend), no checkpointer added. Details
+below + in PLAN.md / ADR-014. Original scoping (IMPROVE the existing ADR-013 graceful ceiling, do
+NOT add one): Motive: observed the tiny model burning its 8-step budget on redundant tool calls then
 dead-ending on a generic apology that "reads as 'I just don't work'." Fixes: richer partial
 answer + redundant-call dedup + budget-aware forced finalization + `thread_id`/checkpointer
 "continue" affordance + **progress narration (Jorge's insight)**. Key reframe: the cap of 8 fused
@@ -27,6 +30,40 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 `forge-pdm-mlops` F9). Both scoped from Jorge's 2026-07-04 review; ADR-014 (Phase 8) / ADR-015
 (Phase 9) when built.
 
+> **2026-07-05 — Phase 8 slice 2: progress narration + step/time guard split (8.5), 8.4 closed.**
+> The narrated streaming path now streams a human `step` line per tool start/end (`narrate_start`/
+> `narrate_end`: "Checking the collections policy on '…'" → "Found 12 rows in the ledger"), rendered
+> live by the UI (`web/src/App.jsx`, coalescing repeats). ADR-013's single step cap is **split into
+> two guards**: the *silent* `invoke`/`ainvoke` path keeps the tight cap (8, `agent_recursion_limit`)
+> because a silent long wait reads as hung; the *narrated* `astream` path gets a higher cap (16,
+> `agent_narrated_step_cap`) **plus** a soft wall-clock budget (45 s, `agent_wall_clock_budget_s`)
+> that narrates a wrap-up and finalizes — a visible, time-bounded, productive run instead of a silent
+> thrash. The cap only rose *because* narration + dedup + finalization ship with it. Clock is
+> injectable (tests don't fight asyncio's own `time.monotonic`). **8.4 (checkpointer "continue") is
+> closed as satisfied-by-design:** the API already resends full history per turn, so a follow-up
+> carries context and 8.1's next-step invite makes it useful — a checkpointer would double-count
+> history (decision in ADR-014). +4 tests (narration lines, `step` events on a normal run, wall-clock
+> early-finalize). **Suite 134.** UI rebuilt (`npm run build` OK). Phase 8 COMPLETE.
+>
+> **2026-07-05 — Phase 8 slice 1: graceful ceiling = dedup + forced finalization (ADR-014).**
+> Fixes the worst live first-impression: a novel typed question that hit the step cap dead-ended on
+> a generic apology that "reads as 'I just don't work'." Now (a) an **identical repeated tool call**
+> is served from a per-turn memo + a firm nudge instead of re-executing (8.2 — "don't squander the
+> budget we have"), and (b) on a ceiling hit the agent **finalizes from what it gathered** — the
+> latest *successful* ledger query and/or a policy finding + the specific gap + a narrowed next step
+> (8.1/8.3) — instead of the canned message. New `src/agent/turn_control.py` (`ToolCallTracker`
+> dedup + observation log in a **`ContextVar`** so the process-wide shared agent is concurrency-safe;
+> `finalize_answer`, deterministic — surfaces only what a tool actually returned, never a fabricated
+> number; errored/guard-rejected queries don't count as facts). Tools gained an optional `wrap`;
+> wired into `invoke`/`ainvoke` (which previously **raised** on the ceiling) **and** `astream`.
+> `tests/test_turn_control.py` (12, offline, incl. a looping-stub end-to-end through both invoke and
+> astream, and dedup through a real `StructuredTool`). **Suite 130 green.** Step cap deliberately
+> **unchanged at 8** — raising it is only safe with 8.5 (narration) + this dedup + finalization, per
+> the phase reframe. **Next:** 8.5 (progress narration → a raised, narrated cap + a soft wall-clock
+> budget), then 8.4 (a "continue" affordance via a LangGraph checkpointer). Live-on-Space
+> confirmation of the tiny-model path is deferred (the tiny-CPU loop can't run cheaply here), as
+> with ADR-013's streaming.
+>
 > **2026-07-03 — Cached questions now hit MID-CONVERSATION + scroll no longer yanks
 > (VERIFIED LIVE).** Live transcript showed a curated question worked only as the FIRST
 > message: `_try_cache` bailed on `len(messages) != 1`, so every suggested question clicked

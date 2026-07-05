@@ -12,7 +12,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
+
+# A tool wrapper (see ``src.agent.turn_control.ToolCallTracker.wrap``): decorates a
+# tool's callable to dedup repeats + record the turn's calls. ``None`` = unwrapped.
+ToolWrap = Callable[[str, Callable[..., str]], Callable[..., str]]
 
 import duckdb
 from chromadb.api.models.Collection import Collection
@@ -50,9 +54,13 @@ def _jsonify(value: Any) -> Any:
 
 
 def make_query_ledger_tool(
-    con: duckdb.DuckDBPyConnection, max_rows: int
+    con: duckdb.DuckDBPyConnection, max_rows: int, *, wrap: ToolWrap | None = None
 ) -> StructuredTool:
-    """Build the `query_ledger` tool bound to a connection and a row cap."""
+    """Build the `query_ledger` tool bound to a connection and a row cap.
+
+    ``wrap`` optionally decorates the callable with the turn tracker (dedup +
+    observation recording, ADR-014); ``None`` leaves the tool bare (tests).
+    """
 
     def query_ledger(sql: str) -> str:
         try:
@@ -77,8 +85,9 @@ def make_query_ledger_tool(
             default=str,
         )
 
+    func = wrap("query_ledger", query_ledger) if wrap else query_ledger
     return StructuredTool.from_function(
-        func=query_ledger,
+        func=func,
         name="query_ledger",
         description=_TOOL_DESCRIPTION,
         args_schema=QueryLedgerInput,
@@ -101,8 +110,13 @@ class SearchPolicyInput(BaseModel):
     )
 
 
-def make_search_policy_tool(collection: Collection, k: int) -> StructuredTool:
-    """Build the `search_policy` tool bound to a policy collection and a top-k."""
+def make_search_policy_tool(
+    collection: Collection, k: int, *, wrap: ToolWrap | None = None
+) -> StructuredTool:
+    """Build the `search_policy` tool bound to a policy collection and a top-k.
+
+    ``wrap`` optionally decorates the callable with the turn tracker (ADR-014).
+    """
 
     def search_policy(query: str) -> str:
         result = collection.query(query_texts=[query], n_results=k)
@@ -122,8 +136,9 @@ def make_search_policy_tool(collection: Collection, k: int) -> StructuredTool:
         ]
         return json.dumps({"query": query, "result_count": len(results), "results": results})
 
+    func = wrap("search_policy", search_policy) if wrap else search_policy
     return StructuredTool.from_function(
-        func=search_policy,
+        func=func,
         name="search_policy",
         description=_SEARCH_DESCRIPTION,
         args_schema=SearchPolicyInput,

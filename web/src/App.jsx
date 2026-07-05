@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { streamChat } from "./api.js";
 
-// Human-readable labels for the agent's tools, shown as live progress steps.
+// Fallback labels if a bare tool name ever reaches the steps list; normally the
+// server streams full "step" narration text (ADR-014, 8.5) that renders as-is.
 const TOOL_LABELS = {
   query_ledger: "Querying the ledger",
   search_policy: "Reading the collections policy",
@@ -70,7 +71,15 @@ export default function App() {
         if (ev.type === "cached") {
           setProgress((p) => ({ ...p, cached: true }));
         } else if (ev.type === "tool") {
-          setProgress((p) => ({ ...p, steps: [...p.steps, ev.name] }));
+          // Kept for tool tags; the human "step" narration below drives the list.
+        } else if (ev.type === "step") {
+          // A live "what I'm doing / what I found" line (ADR-014, 8.5). Coalesce
+          // repeats so a looping tiny model doesn't spam the same line.
+          setProgress((p) =>
+            p.steps[p.steps.length - 1] === ev.text
+              ? p
+              : { ...p, steps: [...p.steps, ev.text] }
+          );
         } else if (ev.type === "answer") {
           answered = true;
           setMessages([...next, { role: "assistant", content: ev.reply, tools: ev.tools_used }]);
@@ -137,8 +146,8 @@ export default function App() {
             </div>
             {progress.steps.length > 0 && (
               <ul className="steps">
-                {progress.steps.map((name, i) => (
-                  <li key={i}>{TOOL_LABELS[name] || name}</li>
+                {progress.steps.map((text, i) => (
+                  <li key={i}>{TOOL_LABELS[text] || text}</li>
                 ))}
               </ul>
             )}
