@@ -23,6 +23,26 @@ from __future__ import annotations
 
 from src.agent.plan_cache import Plan, ToolStep
 
+# A window-function query — top 5 customers by overdue balance *within each* aging
+# bucket. This is exactly the kind of question a tiny model struggles to write in one
+# go (it needs `QUALIFY row_number() OVER (PARTITION BY …)`), so we curate it: several
+# natural phrasings all map to this one guard-valid, live-replayed plan. That turns a
+# reliable tiny-model failure into an instant, correct answer.
+_TOP5_PER_BUCKET = [
+    ToolStep(
+        "query_ledger",
+        {
+            "sql": "SELECT i.aging_bucket, c.name, sum(i.amount) AS overdue_amount "
+            "FROM v_invoices i JOIN v_customer_ar c ON c.customer_id = i.customer_id "
+            "WHERE i.status = 'overdue' "
+            "GROUP BY i.aging_bucket, c.name "
+            "QUALIFY row_number() OVER "
+            "(PARTITION BY i.aging_bucket ORDER BY sum(i.amount) DESC) <= 5 "
+            "ORDER BY i.aging_bucket, overdue_amount DESC"
+        },
+    ),
+]
+
 # question -> ordered tool steps. query_ledger takes {"sql": ...};
 # search_policy takes {"query": ...}. Kept close to how the agent would phrase them.
 CURATED_PLANS: dict[str, list[ToolStep]] = {
@@ -62,6 +82,13 @@ CURATED_PLANS: dict[str, list[ToolStep]] = {
     "When is a customer eligible for a payment plan?": [
         ToolStep("search_policy", {"query": "payment plan eligibility"}),
     ],
+    # Top-N-within-each-group (window function). Several phrasings → one plan, so a
+    # natural follow-up like "top 5 of each age group" hits the cache instead of the
+    # tiny model, which reliably fails to write this SQL (the 2026-07-05 live finding).
+    "Top 5 customers by overdue balance in each aging bucket": _TOP5_PER_BUCKET,
+    "Show me the top 5 overdue customers in each age group.": _TOP5_PER_BUCKET,
+    "Give me the top 5 of each age group.": _TOP5_PER_BUCKET,
+    "Which are the top 5 customers by overdue amount per aging bucket?": _TOP5_PER_BUCKET,
 }
 
 

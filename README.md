@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://jorgeed-receivables-agent.hf.space"><img src="https://img.shields.io/badge/live%20demo-try%20it-brightgreen?logo=huggingface&logoColor=white" alt="Live demo — try it"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-134%20passing-brightgreen" alt="134 tests">
+  <img src="https://img.shields.io/badge/tests-135%20passing-brightgreen" alt="135 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
@@ -43,7 +43,7 @@ policy**.
 > one-command Docker run, the AI-native layer (MCP server + eval suite), a
 > **semantic plan-cache**, **hardware-aware / grammar-constrained** local models and
 > **graceful degradation at the step ceiling** (dedup + forced finalization +
-> narration) are all implemented and tested (**134 tests**), and the whole thing is
+> narration) are all implemented and tested (**135 tests**), and the whole thing is
 > **deployed to a free, self-contained Hugging Face Space** running a tiny local model
 > (no API key). A public, clean-room portfolio project on 100% synthetic data. See
 > [`PLAN.md`](PLAN.md) for the roadmap, [`docs/DEPLOY.md`](docs/DEPLOY.md) for the
@@ -206,7 +206,7 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (134 tests)
+pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (135 tests)
 ```
 
 ## AI-native layer

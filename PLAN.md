@@ -152,7 +152,10 @@ Real use surfaced demo-quality problems that unit tests couldn't; each fixed + v
   auto-scroll-yank** while reading + a persistent **"Instant:" quick-bar**.
 
 **Deferred (next session — pick up cleanly, nothing to reinvent):**
-- **Widen the curated seed set** — the highest-value remaining demo win, fully desktop-doable.
+- **Widen the curated seed set** — ◑ STARTED 2026-07-05: added a **top-N-per-aging-bucket** window
+  query (`QUALIFY row_number() OVER …`) the tiny model can't write, under 4 phrasings + a UI chip
+  (from the live finding that "top 5 of each age group" hit the ceiling). Still the highest-value
+  remaining demo win — keep going, fully desktop-doable.
   Add more **natural phrasings** of the showcased questions (e.g. "top 5 / which 5 / the most
   overdue money" → the top-overdue plan; DSO / aging rewordings) and a few more question types,
   so more of what a reviewer *types* is an **instant cache hit** instead of an ~80 s live run.

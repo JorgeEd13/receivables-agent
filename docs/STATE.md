@@ -30,6 +30,18 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 `forge-pdm-mlops` F9). Both scoped from Jorge's 2026-07-04 review; ADR-014 (Phase 8) / ADR-015
 (Phase 9) when built.
 
+> **2026-07-05 — Phase 8 follow-up (from live testing): curated top-N-per-bucket plan + richer
+> no-gather finalization.** Live test surfaced a real gap: a natural follow-up — *"give me the top 5
+> of each age group"* — hit the ceiling and returned the bare no-progress floor. Two fixes: **(1)** a
+> **curated plan** (`data/curated_plans.py`) for top-5-customers-*within-each*-aging-bucket — a
+> `QUALIFY row_number() OVER (PARTITION BY aging_bucket …)` window query the tiny model reliably
+> can't write — under 4 phrasings + a 5th UI chip, validated against the live ledger (20 rows, 5/bucket);
+> now instant + correct instead of a failure. **(2)** richer finalization: when the model *attempted*
+> the ledger but every query **errored** (vs gathered nothing at all), `finalize_answer` now names the
+> attempt + gives a concrete decomposition (*"ask for one group at a time, e.g. the top 5 in the 90+
+> bucket"*) instead of the generic floor (`_NO_USABLE_RESULT` vs `_NO_PROGRESS`). +2 tests, **suite
+> 135**, UI rebuilt. ADR-014 (the "widen curated seeds" deferred item, now partly done).
+>
 > **2026-07-05 — Phase 8 slice 2: progress narration + step/time guard split (8.5), 8.4 closed.**
 > The narrated streaming path now streams a human `step` line per tool start/end (`narrate_start`/
 > `narrate_end`: "Checking the collections policy on '…'" → "Found 12 rows in the ledger"), rendered

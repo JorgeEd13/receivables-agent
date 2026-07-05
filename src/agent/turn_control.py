@@ -149,6 +149,17 @@ _NO_PROGRESS = (
     "Try one of the example questions (they're instant), or rephrase this more simply."
 )
 
+# Shown when the tiny model *did* try the ledger but every query errored — typically a
+# question that needs a more complex query (e.g. a top-N *within each* group) than the
+# tiny model can write. Naming the attempt + a decomposition beats the bare floor.
+_NO_USABLE_RESULT = (
+    "I tried to answer this from the ledger, but my query didn't run cleanly on the "
+    "free-tier tiny model — this looks like one that needs a more complex query (for "
+    "example, a top-N *within each* group). Two quick ways forward: ask for one group "
+    'at a time (e.g. "the top 5 overdue customers in the 90+ bucket"), or try one of '
+    "the instant example questions."
+)
+
 
 def finalize_answer(
     observations: list[Observation], question: str | None = None
@@ -164,6 +175,11 @@ def finalize_answer(
     policy = _last_policy(observations)
 
     if ledger is None and policy is None:
+        # Nothing usable — but did it at least *try* the ledger? An attempt whose SQL
+        # errored (e.g. a too-complex top-N-per-group query the tiny model can't write)
+        # is more honest to name, with a concrete decomposition, than the bare floor.
+        if _attempted_ledger(observations):
+            return _NO_USABLE_RESULT
         return _NO_PROGRESS
 
     parts = [
@@ -190,6 +206,11 @@ def finalize_answer(
             + " and I'll finish quickly."
         )
     return "\n\n".join(parts)
+
+
+def _attempted_ledger(observations: list[Observation]) -> bool:
+    """Whether the turn made any ``query_ledger`` call (successful or errored)."""
+    return any(obs.tool == "query_ledger" for obs in observations)
 
 
 def _last_ok_ledger(observations: list[Observation]) -> tuple[str, int] | None:

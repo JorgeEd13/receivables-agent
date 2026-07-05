@@ -17,6 +17,7 @@ const SUGGESTIONS = [
   "Who are the top 10 customers by overdue balance?",
   "What is our current DSO?",
   "Show me the total overdue amount by aging bucket.",
+  "Top 5 customers by overdue balance in each aging bucket",
   "What does our policy say about credit holds?",
 ];
 

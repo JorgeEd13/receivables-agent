@@ -166,15 +166,25 @@ def test_finalize_surfaces_partial_ledger_result_and_next_step() -> None:
     assert "couldn't fully finish" in reply.lower()
 
 
-def test_finalize_ignores_errored_ledger_calls() -> None:
-    """A rejected/errored query is not 'gathered facts' → falls back to no-progress."""
+def test_finalize_errored_ledger_gets_decomposition_hint() -> None:
+    """An errored query is not 'gathered facts', but the attempt is named honestly
+    with a concrete decomposition — richer than the bare no-progress floor."""
     bad = Observation(
         tool="query_ledger",
-        args={"sql": "DROP TABLE x"},
-        result=json.dumps({"error": "rejected_by_guardrail", "detail": "no"}),
+        args={"sql": "SELECT ... QUALIFY row_number() ..."},
+        result=json.dumps({"error": "sql_error", "detail": "parse error"}),
     )
     reply = finalize_answer([bad])
-    assert "couldn't finish" in reply.lower()  # the honest no-progress floor
+    assert "didn't run cleanly" in reply.lower()  # names the attempt
+    assert "one group at a time" in reply.lower()  # concrete decomposition
+    assert "couldn't finish" not in reply.lower()  # NOT the empty-turn floor
+
+
+def test_finalize_truly_empty_is_no_progress_floor() -> None:
+    """No tool calls at all → the honest no-progress floor (distinct from an attempt)."""
+    reply = finalize_answer([])
+    assert "couldn't finish" in reply.lower()
+    assert "didn't run cleanly" not in reply.lower()
 
 
 def test_finalize_prefers_the_latest_successful_ledger_query() -> None:
