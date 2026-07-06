@@ -1,12 +1,70 @@
+/* Theme tokens — light is the default; dark is applied by (a) prefers-color-scheme
+   as the ambient signal and (b) a manual, persisted `data-theme` on <html> that
+   MUST win in both directions (the toggle can force light on a dark OS and vice
+   versa). Palette = the hypercube navy+cyan brand shared with forge-pdm's /demo. */
 :root {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --user: #2563eb;
+  --user-text: #ffffff;
+  --assistant: #eef1f6;
+  --text: #1a2233;
+  --muted: #5b6472;
+  --faint: #8a94a6;
+  --accent: #3b5bdb;
+  --line: #e2e6ec;
+  --error: #c92a2a;
+  --chip-shadow: 0 1px 2px rgba(26, 34, 51, 0.06);
+}
+
+/* Dark = the navy brand identity. Ambient (OS) default… */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --user: #2563eb;
+    --user-text: #ffffff;
+    --assistant: #1f2530;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --faint: #8a94a6;
+    --accent: #38bdf8;
+    --line: #2b3340;
+    --error: #f87171;
+    --chip-shadow: none;
+  }
+}
+
+/* …and the manual toggle overrides the ambient signal in BOTH directions. These
+   sit after the media query and target the attribute the app stamps on <html>. */
+:root[data-theme="dark"] {
   --bg: #0f1115;
   --panel: #171a21;
   --user: #2563eb;
+  --user-text: #ffffff;
   --assistant: #1f2530;
   --text: #e7e9ee;
   --muted: #9aa3b2;
+  --faint: #8a94a6;
   --accent: #38bdf8;
+  --line: #2b3340;
   --error: #f87171;
+  --chip-shadow: none;
+}
+
+:root[data-theme="light"] {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --user: #2563eb;
+  --user-text: #ffffff;
+  --assistant: #eef1f6;
+  --text: #1a2233;
+  --muted: #5b6472;
+  --faint: #8a94a6;
+  --accent: #3b5bdb;
+  --line: #e2e6ec;
+  --error: #c92a2a;
+  --chip-shadow: 0 1px 2px rgba(26, 34, 51, 0.06);
 }
 
 * {
@@ -29,6 +87,13 @@ body {
   padding: 1rem;
 }
 
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .header h1 {
   margin: 0 0 0.25rem;
   font-size: 1.4rem;
@@ -40,10 +105,35 @@ body {
   font-size: 0.9rem;
 }
 
+/* The theme + language toggles, top-right. */
+.controls {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.toggle {
+  background: var(--assistant);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.toggle:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .chat {
   flex: 1;
   overflow-y: auto;
   background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 12px;
   padding: 1rem;
   display: flex;
@@ -62,7 +152,7 @@ body {
   margin: 0.25rem 0 0;
   font-size: 0.78rem;
   line-height: 1.35;
-  color: #8a94a6;
+  color: var(--faint);
   text-align: center;
 }
 
@@ -76,7 +166,7 @@ body {
 
 .quick-label {
   font-size: 0.72rem;
-  color: #8a94a6;
+  color: var(--faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -88,7 +178,7 @@ body {
   white-space: nowrap;
   background: var(--assistant);
   color: var(--muted);
-  border: 1px solid #2b3340;
+  border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.25rem 0.7rem;
   font-size: 0.76rem;
@@ -108,12 +198,13 @@ body {
 .chip {
   background: var(--assistant);
   color: var(--text);
-  border: 1px solid #2b3340;
+  border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.6rem 1rem;
   text-align: left;
   cursor: pointer;
   font-size: 0.9rem;
+  box-shadow: var(--chip-shadow);
 }
 
 .chip:hover {
@@ -132,6 +223,7 @@ body {
 .bubble.user {
   align-self: flex-end;
   background: var(--user);
+  color: var(--user-text);
 }
 
 .bubble.assistant {
@@ -153,8 +245,8 @@ body {
 .elapsed {
   font-style: normal;
   font-size: 0.78rem;
-  color: #8a94a6;
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
+  background: rgba(128, 128, 128, 0.14);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
 }
@@ -176,7 +268,7 @@ body {
   margin-top: 0.5rem;
   font-style: normal;
   font-size: 0.78rem;
-  color: #8a94a6;
+  color: var(--faint);
 }
 
 .tools {
@@ -189,7 +281,7 @@ body {
 .tool-tag {
   font-size: 0.72rem;
   color: var(--accent);
-  border: 1px solid #2b3340;
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 0.1rem 0.4rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -198,6 +290,15 @@ body {
 .error {
   color: var(--error);
   font-size: 0.85rem;
+}
+
+/* The i18n honesty line: the UI is localized, the agent's answers are not. */
+.i18n-note {
+  margin: 0.5rem 0.25rem 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--faint);
+  text-align: center;
 }
 
 .composer {
@@ -209,7 +310,7 @@ body {
 .composer input {
   flex: 1;
   background: var(--panel);
-  border: 1px solid #2b3340;
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 0.7rem 0.9rem;
   color: var(--text);

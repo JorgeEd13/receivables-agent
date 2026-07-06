@@ -5,6 +5,50 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-015 — Demo product-polish: light/dark theme + EN/PT-BR i18n (Phase 9)
+
+**Status:** Accepted · 2026-07-06
+
+**Context.** The React chat UI (`web/`) was single-theme (dark-only navy) and
+English-only — a curious tester looking for polish/versatility got neither, and the
+front-end/product axis (a real but under-shown strength) was invisible. Paired with
+the sibling `forge-pdm-mlops` F9 (ADR-018) so the two public demos share one design
+language (the hypercube navy+cyan brand).
+
+**Decision.**
+- **Light/dark theme (9.1).** CSS custom properties on `:root`, **light as the
+  default**, dark applied by (a) `prefers-color-scheme: dark` as the ambient signal
+  and (b) a manual, persisted `data-theme` on `<html>` that **wins in both
+  directions** — the same override discipline the platform's Artifacts use. Two new
+  tiny modules, no dependency: `theme.js` (initial = persisted choice → else OS) and
+  the toggle in the header. Dark keeps the existing navy identity; light is a clean
+  slate.
+- **i18n (9.2), EN + PT-BR.** A **lightweight** locale layer — a string dictionary +
+  a `translator(locale)` closure, no framework (two locales don't warrant one) —
+  in `i18n.js`. Initial locale = a persisted manual choice → else the browser
+  language (`pt*` → PT-BR, else EN), mirroring the theme's ambient-then-override
+  idea. A language toggle localizes all chrome, the hint text, and the progress
+  states.
+- **The seeded example questions stay ENGLISH in every locale** — they are
+  plan-cache keys (a 0.90-similarity ChromaDB cache, ADR-009) *and* the text sent
+  verbatim to the English-corpus agent. A PT-BR paraphrase would miss the cache and
+  fall to the slow tiny model. i18n localizes the chrome *around* them, not the
+  question the agent receives.
+
+**The honesty boundary (load-bearing).** i18n covers the **UI shell only**. The
+agent's answers come from the model + the **English** policy corpus and are **not**
+machine-translated on the fly. A localized interface must not imply localized
+answers, so an `i18nNote` states this explicitly in both languages (it would be a
+larger, separate claim to translate model output — we don't make it).
+
+**Consequences.** First-impression polish + accessibility (theme) and a broader
+tester pool (language) at near-zero cost and no new dependency; no regression to the
+streaming/plan-cache paths (the cache keys are untouched). The build is +2 modules
+(34 vs. 32), `web/dist` rebuilt for the container. The visual language is shared with
+`forge-pdm-mlops` F9.
+
+---
+
 ## ADR-014 — Graceful ceiling: dedup, finalization, narration + wall-clock budget (Phase 8)
 
 **Status:** Accepted · 2026-07-05

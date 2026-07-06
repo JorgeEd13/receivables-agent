@@ -3,7 +3,23 @@
 > Volatile, short, current. Update at the end of each work session.
 
 ## Current focus
-Phases 0–5 done. Phase 6 L1 (plan-cache) + L2 (grammar-constrained, ADR-011) +
+
+**Phase 9 — demo product-polish (light/dark theme + EN/PT-BR i18n) — ✅ SHIPPED 2026-07-06
+(ADR-015).** The React chat UI was single-theme (dark navy) and English-only; Phase 9 adds a
+**light/dark theme** (CSS custom props; `prefers-color-scheme` default + a persisted
+`data-theme` override that wins both ways — `theme.js`) and a **lightweight EN/PT-BR i18n
+layer** (string dict + `translator()` closure, no framework — `i18n.js`), with theme +
+language toggles in the header. **Honesty boundary held (ADR-015):** i18n localizes the **UI
+shell only** — the agent answers from the model + the **English** policy corpus and is NOT
+machine-translated; an `i18nNote` says so in both languages. **The seeded example questions
+stay English in every locale on purpose** — they are plan-cache keys (0.90-similarity, ADR-009)
+*and* the text sent verbatim to the English-corpus agent, so a PT-BR paraphrase would miss the
+cache and hit the slow tiny model. `npm run build` green (34 modules, was 32; `web/dist`
+rebuilt for the container). No regression to the streaming/plan-cache paths. **Paired with
+`forge-pdm-mlops` F9 (ADR-018)** for one shared design language (hypercube navy+cyan). Front-end
+showcase (a strong, under-shown axis). ADR-015 written; PLAN Phase 9 done.
+
+> **Prior:** Phases 0–5 done. Phase 6 L1 (plan-cache) + L2 (grammar-constrained, ADR-011) +
 7.1 (hardware-aware, ADR-010) done. Suite **110 green**. **Phase 6 LAYER 3 SHIPPED
 + LIVE (ADR-012): the self-contained tiny-Ollama Space is deployed and answering.**
 🚀 **https://jorgeed-receivables-agent.hf.space** — `/api/health` ok, a seeded

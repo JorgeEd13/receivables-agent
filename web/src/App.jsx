@@ -1,18 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { streamChat } from "./api.js";
-
-// Fallback labels if a bare tool name ever reaches the steps list; normally the
-// server streams full "step" narration text (ADR-014, 8.5) that renders as-is.
-const TOOL_LABELS = {
-  query_ledger: "Querying the ledger",
-  search_policy: "Reading the collections policy",
-};
+import { initialLocale, persistLocale, translator } from "./i18n.js";
+import { applyTheme, initialTheme } from "./theme.js";
 
 // These MUST mirror the plan-cache seed set (data/seed_plan_cache.py) so every
 // one-click suggestion is a cache hit that replays in ~3s — instant on the free
 // CPU Space, instead of a multi-minute tiny-model cold path. Reword either list
 // and you reintroduce a slow first impression (the cache uses a 0.90 similarity
 // threshold, so a paraphrase misses). Keep the two in lockstep.
+// They stay ENGLISH in every UI locale on purpose: they are cache keys AND the
+// text sent verbatim to the (English-corpus) agent — i18n localizes the chrome
+// around them, not the question the agent receives (ADR-015 honesty boundary).
 const SUGGESTIONS = [
   "Who are the top 10 customers by overdue balance?",
   "What is our current DSO?",
@@ -30,7 +28,21 @@ export default function App() {
   //   cached  — a plan-cache hit (fast); steps  — tool events as they happen;
   //   elapsed — seconds ticking so a slow tiny-model answer never looks frozen.
   const [progress, setProgress] = useState(null); // {cached, steps: [name], elapsed}
+  const [theme, setTheme] = useState(initialTheme);
+  const [locale, setLocale] = useState(initialLocale);
   const scrollRef = useRef(null);
+  const t = translator(locale);
+
+  // Stamp the theme attribute on <html> (and persist) whenever it changes.
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  // Persist the language choice + reflect it on <html lang> for a11y/SEO.
+  useEffect(() => {
+    persistLocale(locale);
+    document.documentElement.setAttribute("lang", locale);
+  }, [locale]);
 
   // Auto-scroll to the newest content — but ONLY if the user is already near the
   // bottom. If they've scrolled up to read while the agent is thinking, don't yank
@@ -88,7 +100,7 @@ export default function App() {
           throw new Error(ev.message);
         }
       });
-      if (!answered) throw new Error("The agent did not return an answer.");
+      if (!answered) throw new Error(t("noAnswer"));
     } catch (e) {
       setError(e.message);
       setMessages(next); // drop the optimistic turn's pending reply
@@ -101,12 +113,28 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>receivables-agent</h1>
-        <p>
-          Ask about overdue invoices, aging, DSO and the collections policy. The
-          agent answers from a synthetic ledger (guarded SQL) and a policy doc
-          (RAG).
-        </p>
+        <div>
+          <h1>{t("title")}</h1>
+          <p>{t("intro")}</p>
+        </div>
+        <div className="controls">
+          <button
+            className="toggle"
+            onClick={() => setTheme((th) => (th === "dark" ? "light" : "dark"))}
+            title={theme === "dark" ? t("themeToLight") : t("themeToDark")}
+            aria-label={theme === "dark" ? t("themeToLight") : t("themeToDark")}
+          >
+            {theme === "dark" ? t("themeToLight") : t("themeToDark")}
+          </button>
+          <button
+            className="toggle"
+            onClick={() => setLocale((l) => (l === "en" ? "pt-BR" : "en"))}
+            title="EN / PT"
+            aria-label="Switch language"
+          >
+            {locale === "en" ? "PT" : "EN"}
+          </button>
+        </div>
       </header>
 
       <div className="chat" ref={scrollRef}>
@@ -117,10 +145,7 @@ export default function App() {
                 {s}
               </button>
             ))}
-            <p className="suggestions-hint">
-              These answer instantly (pre-cached plans, re-run live). Typing your
-              own runs a tiny model on a free CPU — it works, just give it a moment.
-            </p>
+            <p className="suggestions-hint">{t("suggestionsHint")}</p>
           </div>
         )}
 
@@ -129,9 +154,9 @@ export default function App() {
             <div className="content">{m.content}</div>
             {m.tools?.length > 0 && (
               <div className="tools">
-                {m.tools.map((t) => (
-                  <span key={t} className="tool-tag">
-                    {t}
+                {m.tools.map((tool) => (
+                  <span key={tool} className="tool-tag">
+                    {tool}
                   </span>
                 ))}
               </div>
@@ -142,21 +167,18 @@ export default function App() {
         {busy && progress && (
           <div className="bubble assistant thinking">
             <div className="progress-head">
-              {progress.cached ? "Replaying a cached plan…" : "Thinking…"}
+              {progress.cached ? t("replaying") : t("thinking")}
               <span className="elapsed">{progress.elapsed}s</span>
             </div>
             {progress.steps.length > 0 && (
               <ul className="steps">
                 {progress.steps.map((text, i) => (
-                  <li key={i}>{TOOL_LABELS[text] || text}</li>
+                  <li key={i}>{t(text)}</li>
                 ))}
               </ul>
             )}
             {!progress.cached && progress.elapsed >= 6 && (
-              <div className="progress-hint">
-                Running a tiny model on a free CPU — this can take up to a minute.
-                It’s working, not stuck.
-              </div>
+              <div className="progress-hint">{t("slowHint")}</div>
             )}
           </div>
         )}
@@ -167,7 +189,7 @@ export default function App() {
           after the first answer, not just on an empty chat. */}
       {messages.length > 0 && (
         <div className="quick-bar" aria-label="Instant example questions">
-          <span className="quick-label">Instant:</span>
+          <span className="quick-label">{t("instantLabel")}</span>
           {SUGGESTIONS.map((s) => (
             <button
               key={s}
@@ -182,6 +204,10 @@ export default function App() {
         </div>
       )}
 
+      {/* Honesty boundary (ADR-015): the interface is localized; the agent's
+          answers are not machine-translated. */}
+      <p className="i18n-note">{t("i18nNote")}</p>
+
       <form
         className="composer"
         onSubmit={(e) => {
@@ -192,11 +218,11 @@ export default function App() {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about the receivables ledger…"
+          placeholder={t("placeholder")}
           disabled={busy}
         />
         <button type="submit" disabled={busy || !input.trim()}>
-          Send
+          {t("send")}
         </button>
       </form>
     </div>

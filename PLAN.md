@@ -337,7 +337,19 @@ Showcase framing: *"I made a tiny model degrade gracefully — it narrates what 
 cycles, and always ends in an answer — instead of freezing then apologizing,"* a strong, honest
 AI-reliability story.
 
-### Phase 9 — Demo product-polish: theme + internationalization (i18n) + friendlier UX  ⏳ (planned)
+### Phase 9 — Demo product-polish: theme + internationalization (i18n) + friendlier UX  ✅ (SHIPPED 2026-07-06, ADR-015)
+
+**DONE (2026-07-06, ADR-015).** 9.1 (light/dark theme — `theme.js`, CSS custom props,
+`prefers-color-scheme` default + a persisted `data-theme` override that wins both ways) + 9.2
+(EN/PT-BR i18n — `i18n.js`, a string dict + `translator()` closure, no framework; theme +
+language toggles in the header) shipped. The **honesty boundary is stated in-UI** (an `i18nNote`
+in both languages: the interface is localized, the agent's English-corpus answers are not
+machine-translated). The seeded example questions stay **English in every locale** on purpose
+(plan-cache keys, ADR-009, + the verbatim text sent to the agent — a PT-BR paraphrase would miss
+the 0.90 cache and hit the slow tiny model). `npm run build` green (34 modules); `web/dist`
+rebuilt for the container; no regression to streaming/plan-cache. Paired design language with
+`forge-pdm-mlops` F9 (ADR-018). 9.3 (friendlier affordances) folded in via the localized
+progress states + hints. Details below.
 
 **Why (observed):** the React chat UI (`web/`) is **single-theme and English-only** (one `web/src/styles.css`,
 no locale layer) — Jorge's note: "both demos have only one language and one theme; testers looking for
