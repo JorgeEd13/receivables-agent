@@ -66,7 +66,10 @@ that are re-run live against the ledger, so the numbers are always current); a *
 question runs the tiny model on a free CPU, so it's slower — the UI streams the agent's steps
 live and shows an elapsed timer so you can watch it think. That slowness is the honest
 free-tier floor: the *architecture* (governed text-to-SQL + RAG) is the product — point it at
-a stronger model and the same code shines. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
+a stronger model and the same code shines. The UI ships a **light/dark theme** (follows your
+OS, with a manual toggle) and an **EN/PT-BR** language switch — note the interface is
+localized, but the agent's answers come from the model and the English policy corpus, so they
+are not machine-translated. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## What it does
 
