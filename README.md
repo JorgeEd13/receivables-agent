@@ -16,13 +16,17 @@
 </p>
 
 <p align="center">
-  <strong>🚀 Try it live:</strong>
+  <strong>▶ Try it live — no signup, no API key:</strong>
   <a href="https://jorgeed-receivables-agent.hf.space">jorgeed-receivables-agent.hf.space</a>
-  — a self-contained Hugging Face Space running a <strong>tiny local model</strong>
-  (no API key, 100% synthetic data). The one-click example questions answer
-  instantly (cached plans, re-run live); a typed question runs the tiny model on a
-  free CPU, so it's slower — that's the <em>"shines with a better model"</em> story,
-  by design.
+</p>
+
+<p align="center">
+  <em>A self-contained Hugging Face Space running its <strong>own tiny local model</strong>.
+  The one-click example questions answer <strong>instantly</strong> (cached <em>plans</em>, re-run
+  live against the ledger, so the numbers are current); a typed question runs the tiny model on a
+  free CPU, so it's slower — the UI streams the agent's steps so you can watch it think. That
+  slowness is the honest free-tier floor: the <strong>architecture</strong> is the product, and
+  the same code shines pointed at a stronger model.</em>
 </p>
 
 **Collections teams burn hours on two questions every day: _who do we chase
@@ -38,16 +42,14 @@ question. Under the hood it's a ReAct agent that combines a **guarded
 text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
-> **Status: shipped + live.** The agent, the guarded SQL + RAG tools, the FastAPI
-> service (with **live SSE streaming** — watch the agent think), the React UI, the
-> one-command Docker run, the AI-native layer (MCP server + eval suite), a
-> **semantic plan-cache**, **hardware-aware / grammar-constrained** local models and
-> **graceful degradation at the step ceiling** (dedup + forced finalization +
-> narration) are all implemented and tested (**135 tests**), and the whole thing is
-> **deployed to a free, self-contained Hugging Face Space** running a tiny local model
-> (no API key). A public, clean-room portfolio project on 100% synthetic data. See
-> [`PLAN.md`](PLAN.md) for the roadmap, [`docs/DEPLOY.md`](docs/DEPLOY.md) for the
-> live deploy, and [`docs/STATE.md`](docs/STATE.md) for current progress.
+> **The honesty boundary.** A public, **clean-room** portfolio project on **100% synthetic
+> data** — no proprietary code, no real ledger. Shipped and live: **135 offline tests**, CI
+> green. The UI is localized (EN/PT-BR), but the agent's answers come from the model and an
+> **English** policy corpus — they are not machine-translated.
+>
+> Depth lives in [`docs/DECISIONS.md`](docs/DECISIONS.md) (the ADRs),
+> [`docs/DEPLOY.md`](docs/DEPLOY.md) (the live deploy) and
+> [`docs/STATE.md`](docs/STATE.md) (current progress).
 
 ![receivables-agent demo](docs/demo.gif)
 
@@ -56,20 +58,6 @@ policy**.
 *and* the cited rule. The `tools_used` badge shows which tools each answer hit.
 Recorded against a local Ollama model (`qwen2.5:7b`); a `GEMINI_API_KEY` works
 the same way.*
-
-### 🚀 Try it live
-
-**[jorgeed-receivables-agent.hf.space](https://jorgeed-receivables-agent.hf.space)** — a
-self-contained Hugging Face Space that runs its **own tiny local model** (no API key, 100%
-synthetic data). The one-click **example questions answer instantly** (pre-computed *plans*
-that are re-run live against the ledger, so the numbers are always current); a **typed**
-question runs the tiny model on a free CPU, so it's slower — the UI streams the agent's steps
-live and shows an elapsed timer so you can watch it think. That slowness is the honest
-free-tier floor: the *architecture* (governed text-to-SQL + RAG) is the product — point it at
-a stronger model and the same code shines. The UI ships a **light/dark theme** (follows your
-OS, with a manual toggle) and an **EN/PT-BR** language switch — note the interface is
-localized, but the agent's answers come from the model and the English policy corpus, so they
-are not machine-translated. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## What it does
 
