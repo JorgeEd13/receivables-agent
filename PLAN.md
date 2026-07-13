@@ -125,7 +125,7 @@ ledger; non-root UID 1000; pins `OLLAMA_MODEL=qwen2.5:1.5b` for a deterministic 
 via a `space-deploy` branch (HF front-matter README + the image as the literal `Dockerfile` +
 `.gitattributes` LFS-tracking `*.png`/`*.gif`). Honest security + latency banners in DEPLOY.md
 and the UI. **LIVE: https://jorgeed-receivables-agent.hf.space.** Build gotchas (each fixed,
-ACHADOS): corp-CA needed for in-build pip/npm/ONNX (git-ignored, no-op on HF); `zstd`; the ONNX
+Findings worth writing up: corp-CA needed for in-build pip/npm/ONNX (git-ignored, no-op on HF); `zstd`; the ONNX
 embedder must be baked into **appuser's** cache (root-download → runtime re-download corrupted
 = `INVALID_PROTOBUF` crash).
 
@@ -201,14 +201,14 @@ default). Offline tests in `tests/test_hardware.py`; verified live on the notebo
   container entrypoint / compose can consume. Offline-testable (mock the detectors) so
   it fits the "unit tests run offline" rule.
 - → new ADR (hardware-aware selection; catalog is public data; clean-room note that
-  reusing FIA engineering ≠ leaking the employer data).
+  reusing my own prior engineering ≠ leaking any employer's data).
 
-**7.2 — FIA→receivables parity audit (the rest).** A **dedicated full-scan session**:
-walk the whole FIA feature set and port what's pertinent to a public AR-agent showcase
-(skip anything the employer/GPS-specific). **Accelerator (start here, don't stop here):** mine
-`(private career repo)` for the FIA "engenuity" entries — they already flag
-the CV/post-worthy techniques, so they're the fastest index of what's worth transferring.
-Then sweep the FIA repo itself for anything the ACHADOS didn't capture. Candidates to
+**7.2 — parity audit against my prior private agent (the rest).** A **dedicated full-scan
+session**: walk that project's feature set and port what's pertinent to a public AR-agent
+showcase (skip anything employer- or GPS-specific). **Accelerator (start here, don't stop
+here):** my private engineering-findings log already flags the techniques worth writing up,
+so it's the fastest index of what's worth transferring. Then sweep the private repo itself
+for anything the log didn't capture. Candidates to
 check — richer provider fallback ergonomics, the hardware diagnostic UX, any
 guardrail/prompt refinements, RAG/indexer niceties, `.env`/config ergonomics. Record
 kept / improved / dropped per item (ADR or a short table), so the sweep is auditable and

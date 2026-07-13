@@ -163,7 +163,7 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > on "Thinking…" — fixed by making `web/src/App.jsx` SUGGESTIONS mirror `data/seed_plan_cache.py`
 > exactly (every chip is now a ~3 s cache hit); (b) added an honest latency hint (chips =
 > instant/cached, typed = live tiny model, may take up to a minute) so "Thinking…" never
-> reads as hung. **Deploy gotchas (ACHADOS candidates, portable to the other Spaces):** git &
+> reads as hung. **Deploy gotchas (portfolio-worthy findings, portable to the other Spaces):** git &
 > the Docker daemon trust the corp CA (push/pull work) even though `curl`/schannel fails
 > revocation; HF binaries need LFS; `git lfs migrate` rewrites shared history → keep it OFF
 > `main` (had to hard-reset local `main` to the clean `origin/main` after a leak; origin was
@@ -179,10 +179,11 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > **background** plan-cache warm), `scripts/deploy_space.sh` (mirrors forge-pdm F6),
 > `docs/DEPLOY.md`, ADR-012. **Built + ran end-to-end here on Docker Desktop.**
 >
-> **Findings from actually building it (each fixed):** (1) `docker build` pip/npm hit the
-> the employer a corporate network appliance **TLS-MITM** — daemon pulls base images fine, but installs *inside* the
-> build don't trust the corp CA. Fix: OPTIONAL `corp-ca.cr[t]` (glob) COPY’d in +
-> `update-ca-certificates`; **git-ignored, never shipped**; a NO-OP on HF's clean runners.
+> **Findings from actually building it (each fixed):** (1) `docker build` pip/npm hit a
+> **TLS-intercepting corporate proxy** on the build network — the daemon pulls base images
+> fine, but installs *inside* the build don't trust the interception CA. Fix: OPTIONAL
+> `corp-ca.cr[t]` (glob) COPY’d in + `update-ca-certificates`; **git-ignored, never
+> shipped**; a NO-OP on HF's clean runners.
 > (2) Ollama installer needs **`zstd`** (slim image lacks it). (3) `--select` prints TWO
 > stdout lines (`OLLAMA_MODEL=` **and** `HAS_GPU=`) → the entrypoint must grep just the
 > model line. (4) The runtime **ONNX embedding download** (ChromaDB MiniLM) also hit the
@@ -192,7 +193,7 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > ~25 s/answer) — doing it *before* serving left `/api/health`+UI dead for minutes → moved
 > the warm to the **background** so uvicorn is live immediately. Tiny-CPU inference is slow
 > by nature; the plan-cache hides it on headline Qs. **These CA/zstd findings are portable
-> to the other public Spaces (forge-pdm already deployed) — candidate ACHADOS.**
+> to the other public Spaces (forge-pdm already deployed) — worth writing up.**
 
 > **2026-07-02 — Phase 6 LAYER 2 DONE (grammar-constrained tool-calls, ADR-011).**
 > **Tested first (per the "measure, don't assume" call) and it refuted the plan's
@@ -242,7 +243,7 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 >
 > **Remaining Phase 7 (later sessions):**
 > - **7.2 (dedicated full-scan session):** audit the *whole* FIA feature set. Start
->   by mining `(private career repo)` FIA "engenuity" entries, then
+>   by mining my private engineering-findings log, then
 >   sweep the FIA repo. Record kept/improved/dropped per item.
 > - **7.3:** upgrade `docker-compose.yml` single-service/Gemini-only →
 >   **multi-service** (app + `ollama` + models volume); a compose entrypoint can
