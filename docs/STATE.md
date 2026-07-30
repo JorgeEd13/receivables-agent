@@ -4,6 +4,55 @@
 
 ## Current focus
 
+**ADR-022 — the SQL guardrail was broken, and is now rebuilt on DuckDB's own parser. ✅ SHIPPED
+2026-07-30.** An external review found one bypass (the relation allow-list never looked inside a
+derived table). Repairing it triggered **three rounds of adversarial review by an instance with
+no knowledge of the design**, which found much worse — all verified end-to-end against a real
+connection, not argued on paper:
+
+- `_mask_literals` modelled `'…'` but **not** dollar-quoting (`$a$…$a$`), escape strings
+  (`e'\''`) or quoted identifiers containing an apostrophe. Any of the three flips quote parity
+  and blanks **the entire rest of the statement** out of every check — while the unblanked
+  original is what executes. Read `duckdb_settings()`, the ledger's file path, forbidden tables.
+- The same desync hid `;`: closing the guard's own `SELECT * FROM (…)` wrapper early made
+  **`CREATE TEMP TABLE` / `VIEW` / `MACRO` and `PREPARE` succeed on a `read_only=True`
+  connection**, persisting for the session.
+- `SHOW ALL TABLES` enumerated the catalog past two empty allow-lists; CTE names exempted tables
+  in sibling scopes, forward-declared, and inside their own bodies; a CTE name with a quoted dot
+  defeated the schema check.
+
+**The scanner was replaced, not patched:** the statement is parsed by the **same parser that
+executes it** (`extract_statements` + `json_serialize_sql`) and every check runs on the syntax
+tree, so parser-vs-executor disagreement is impossible by construction rather than merely fixed.
+Full reasoning in **ADR-022**.
+
+**Measured, and it changed a decision:** on DuckDB 1.5.3 the **anchor** term of
+`WITH RECURSIVE x AS (SELECT c FROM x UNION ALL …)` binds to a real base table named `x` and
+returns its rows — so "a CTE's own name is exempt in its own body" cannot be made safe by
+restricting it to the recursive form. **Recursive CTEs are now refused on purpose**, recorded in
+`tests/test_sql_guard_adversarial.py` with the measurement.
+
+**It also got LESS restrictive where it was wrong:** `EXTRACT(year FROM d)`, `SUBSTRING … FROM …
+FOR`, `TRIM(BOTH … FROM …)`, `DECIMAL`/`VARCHAR` casts, `WITH t(a)`, `now()`, **`INTERVAL 30
+DAY`** and schema-qualified references to allow-listed tables were all being refused. The old
+relation scanner read the `FROM` inside `EXTRACT` as a relation list.
+
+**261 tests** (135 pre-existing + 126 adversarial kept as a regression floor). **First CI
+workflow this repo has ever had** — there was none, so nothing ran unless someone remembered —
+plus ruff + mypy gates, both clean.
+
+> ⚠️ **OPEN — the live demo still runs the vulnerable guard.** `space-deploy` is **43 commits
+> behind `main`** (drifting since Phase 6). `git push origin` does not deploy the HF Space. This
+> needs a dedicated session: the cherry-pick could not be validated here because checking out
+> `space-deploy` fails on an LFS smudge error (`assets/logo.png`).
+
+> ⚠️ **Verification lesson from this session, worth more than the fix.** The lint gate was
+> reported green locally and failed in CI minutes later. The check was
+> `ruff check . -q | grep '^Found'` — and `-q` **suppresses that very line**, so the grep could
+> never match and "clean" was printed unconditionally. Verify tools by **exit code**, never by
+> grepping their output. Also: adding a CI workflow and not polling `gh run list` in the same
+> session leaves a new gate indistinguishable from a passing one.
+
 **Phase 9 — demo product-polish (light/dark theme + EN/PT-BR i18n) — ✅ SHIPPED 2026-07-06
 (ADR-015).** The React chat UI was single-theme (dark navy) and English-only; Phase 9 adds a
 **light/dark theme** (CSS custom props; `prefers-color-scheme` default + a persisted
