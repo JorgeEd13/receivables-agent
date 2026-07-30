@@ -83,10 +83,15 @@ refused by DuckDB regardless of the guard.
 > rows *returned*, not rows *computed*. Confidentiality held under every vector tried.
 > Needs a design call (watchdog interrupt / row budget / killable subprocess) — see ADR-022.
 
-> ⚠️ **OPEN — the live demo still runs the vulnerable guard.** `space-deploy` is **43 commits
-> behind `main`** (drifting since Phase 6). `git push origin` does not deploy the HF Space. This
-> needs a dedicated session: the cherry-pick could not be validated here because checking out
-> `space-deploy` fails on an LFS smudge error (`assets/logo.png`).
+> ⚠️ **OPEN — the live demo still runs the vulnerable guard.** Measured 2026-07-30:
+> `git rev-list --count space/main..origin/main` = **50**. The deploy target is the **`space`
+> remote** (`space/main`), not a `space-deploy` branch — that branch no longer exists on `origin`
+> and the earlier "43 commits behind `space-deploy`" line named a target that is gone. `git push
+> origin` does not deploy the HF Space. Still needs a dedicated session: the cherry-pick could not
+> be validated because checking the deploy tree out fails on an LFS smudge error
+> (`assets/logo.png`). Note what is actually live there: `space/main` predates ADR-022 entirely,
+> so the demo runs the **string scanner**, not the parser-based guard — the catalog hole fixed
+> above is the smaller of the two gaps.
 
 > ⚠️ **Verification lesson from this session, worth more than the fix.** The lint gate was
 > reported green locally and failed in CI minutes later. The check was
