@@ -119,8 +119,9 @@ code rather than posing as live checks.
 > rows *returned*, not rows *computed*. Confidentiality held under every vector tried.
 > Needs a design call (watchdog interrupt / row budget / killable subprocess) — see ADR-022.
 
-> ⚠️ **OPEN — the live demo still runs the vulnerable guard.** Measured 2026-07-30:
-> `git rev-list --count space/main..origin/main` = **50**. The deploy target is the **`space`
+> ⚠️ **OPEN — the live demo still runs the vulnerable guard.** Re-measured 2026-07-30 after the
+> normalization fix: `git rev-list --count space/main..origin/main` = **52** (was 50; every guard
+> fix since widens this gap rather than closing it). The deploy target is the **`space`
 > remote** (`space/main`), not a `space-deploy` branch — that branch no longer exists on `origin`
 > and the earlier "43 commits behind `space-deploy`" line named a target that is gone. `git push
 > origin` does not deploy the HF Space. Still needs a dedicated session: the cherry-pick could not
