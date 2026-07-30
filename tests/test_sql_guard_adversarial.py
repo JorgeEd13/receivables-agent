@@ -18,6 +18,19 @@ Two kinds of test live here:
   engine executes it and it reads something forbidden.
 
 Everything is offline and takes well under a second. No LLM.
+
+HOW TO READ THE SECTION HEADERS. Each numbered block below states the defect
+**as it was found in that round**, in the implementation that existed then — it
+is a record of the break, not a description of today's guard. What is true today
+is what the assertions say: everything here is green against the current
+implementation. Where a round closed an earlier round's findings, a banner says
+so explicitly. Round 3's own findings are closed too (see the note at the end of
+this docstring), which is why no round-4 banner exists to say it.
+
+ROUND 3 IS CLOSED. `_collect` now walks each CTE definition with only the CTEs
+declared *before* it in scope, so the forward-reference and self-reference
+payloads in R3-1 are refused. The R3 section header describes the walk as it was
+when those payloads were written.
 """
 
 from __future__ import annotations
@@ -300,11 +313,15 @@ def test_quoted_function_name_does_not_leak_the_temp_directory(con) -> None:
 
 # --------------------------------------------------------------------------- #
 # 5. Guard-layer-only defect: a string constant used as a relation. DuckDB reads
-#    `FROM '/path/x.csv'` as a file scan, but the relation scanner tokenises no
-#    identifier there (the literal is masked to ''), so *zero* relations are
-#    reported and the allow-list check trivially passes. Today only
-#    `enable_external_access=false` stops this — the prompt layer contributes
-#    nothing, which is exactly the single-layer situation ADR-022 set out to end.
+#    `FROM '/path/x.csv'` as a file scan, but the relation scanner tokenised no
+#    identifier there (the literal was masked to ''), so *zero* relations were
+#    reported and the allow-list check passed trivially. At the time only
+#    `enable_external_access=false` stopped this — a single layer, which is
+#    exactly the situation ADR-022 set out to end.
+#
+#    CLOSED by the tree walk: the parser reports the file string as the
+#    `table_name` of a BASE_TABLE, so the allow-list sees it. Measured on DuckDB
+#    1.5.3: `Relation(s) not in allow-list: /etc/passwd.`
 # --------------------------------------------------------------------------- #
 
 
@@ -393,9 +410,11 @@ def test_deny_word_inside_an_ordinary_literal_is_still_data() -> None:
 
 # --------------------------------------------------------------------------- #
 # 7. Over-blocking (guarantee 4). Every query below is valid DuckDB, reads only
-#    allow-listed relations, and is refused today. Each is executed against the
-#    real connection first, so the test cannot be satisfied by "fixing" the
-#    guard to accept something DuckDB would reject anyway.
+#    allow-listed relations, and was refused *when this block was written* — each
+#    one is a false positive that had to be repaired, and the assertion is that
+#    it stays repaired. Each is executed against the real connection first, so
+#    the test cannot be satisfied by "fixing" the guard to accept something
+#    DuckDB would reject anyway.
 # --------------------------------------------------------------------------- #
 
 LEGITIMATE = [
@@ -711,7 +730,8 @@ def test_r2_near_miss_attacks_stay_rejected(sql: str, label: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# R2-5. Over-blocking introduced by the rewrite (guarantee 4).
+# R2-5. Over-blocking introduced by the rewrite (guarantee 4) — same convention
+#       as §7: refused when written, repaired since, asserted so it stays that way.
 # --------------------------------------------------------------------------- #
 
 R2_LEGITIMATE = [

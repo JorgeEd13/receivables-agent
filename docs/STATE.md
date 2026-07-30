@@ -48,6 +48,16 @@ relation scanner read the `FROM` inside `EXTRACT` as a relation list.
 workflow this repo has ever had** — there was none, so nothing ran unless someone remembered —
 plus ruff + mypy gates, both clean.
 
+**2026-07-30, comments only (no behaviour change).** Walking the adversarial suite line by line
+surfaced that its section headers describe each defect **in the present tense**, and three had
+gone false: §5 claimed only `enable_external_access=false` stops a file string used as a relation
+(the tree walk refuses it — `Relation(s) not in allow-list: /etc/passwd`), and §7 / R2-5 claimed
+their over-blocking cases are "refused today" when all 13 pass. Rounds 1 and 2 have closing
+banners; round 3 has none, because it was last — so its header still describes a walk that no
+longer exists. Fixed by adding a "how to read the section headers" note to the module docstring
+(the headers are a record of the break, the assertions are the present tense) plus a round-3
+closing note, and by moving the three false sentences to the past tense.
+
 > ⚠️ **OPEN — availability.** The guard bounds what can be READ, not how much WORK a query
 > may do. `WITH RECURSIVE invoices(n) AS (… n < 100000000) …`, `repeat('a', 1000000000)` and a
 > six-way self-cartesian join are all **accepted** and never return; the outer `LIMIT 200` caps
