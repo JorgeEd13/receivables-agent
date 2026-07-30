@@ -153,13 +153,19 @@ class PlanCache:
         ids = result["ids"][0]
         if not ids:
             return None
-        distances = (result.get("distances") or [[None]])[0]
+        raw_distances = result.get("distances")
+        distances: list[float | None] = (
+            list(raw_distances[0]) if raw_distances else [None]
+        )
         distance = distances[0]
         if distance is None or distance > (1.0 - self._threshold):
             return None
-        metadata = result["metadatas"][0][0] or {}
+        raw_metas = result["metadatas"]
+        if raw_metas is None:
+            return None
+        metadata = raw_metas[0][0] or {}
         raw = metadata.get("plan")
-        if not raw:
+        if not isinstance(raw, str) or not raw:
             return None
         return Plan.from_json(raw)
 

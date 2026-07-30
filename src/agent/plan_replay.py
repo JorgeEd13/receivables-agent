@@ -111,8 +111,11 @@ def _replay_search(args: dict[str, Any], policy: Collection, search_k: int) -> s
     if not isinstance(query, str):
         raise ReplayError("Cached search_policy step has no query.")
     result = policy.query(query_texts=[query], n_results=search_k)
-    documents = result["documents"][0]
-    metadatas = result["metadatas"][0]
+    raw_docs, raw_metas = result["documents"], result["metadatas"]
+    if raw_docs is None or raw_metas is None:
+        raise ReplayError("Cached policy search returned nothing.")
+    documents = raw_docs[0]
+    metadatas = raw_metas[0]
     if not documents:
         raise ReplayError("Cached policy search returned nothing.")
 

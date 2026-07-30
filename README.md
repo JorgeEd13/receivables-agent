@@ -65,8 +65,10 @@ Ask things like *"Which overdue invoices above $50k should we prioritize this
 week, and what does our policy say about offering a payment plan?"* The agent:
 
 1. Plans which tools to call (a ReAct loop on LangGraph).
-2. Queries the receivables ledger through a **read-only, allow-listed SQL tool**
-   (defense in depth: the model can never mutate or escape the database).
+2. Queries the receivables ledger through a **parser-validated, allow-listed SQL
+   tool** — the statement is checked against DuckDB's own syntax tree, on a
+   read-only connection with external access disabled, so the validator and the
+   executor cannot disagree about what the query says (ADR-022).
 3. Retrieves relevant rules from a **collections-policy knowledge base** (RAG).
 4. Answers in natural language, grounded in both sources.
 
@@ -257,8 +259,9 @@ without hand-tuning. Two pieces make the local path do that automatically:
   valid JSON but invents argument fields and omits the real `sql`; another writes
   correct SQL in prose and emits no tool call at all. So the local model's reply is
   constrained to a `{tool, sql|query, answer}` schema (Ollama's `format`, a GBNF
-  grammar underneath) and translated back into `tool_calls`. Measured across the
-  golden questions this moves both tiny models from ≤1/5 to 5/5 well-formed calls.
+  grammar underneath) and translated back into `tool_calls`. Across the five golden
+  questions this moves both tiny models from ≤1/5 to 5/5 well-formed calls — n=5,
+  one run per case, so read it as a demonstration rather than a measurement.
   It's **tier-gated** (reusing the hardware catalog): tiny models get the shim,
   stronger models keep native tool-calling — constraining a capable model would
   only hold it back. `format` fixes the *structure*; SQL *quality* still scales

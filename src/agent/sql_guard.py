@@ -1,29 +1,59 @@
 """Guardrail for the text-to-SQL tool — the priority security surface.
 
 The agent may *only* run read-only analytical queries against a fixed set of
-relations. This module is the prompt-layer filter; it is paired with a
-**read-only DuckDB connection** (see ``ledger.py``) so the two form defense in
-depth: even if a jailbroken prompt slipped a mutation past this filter, the
-connection physically cannot write.
+relations. This module is the prompt-layer filter, paired with a hardened
+DuckDB connection (see ``ledger.py``).
+
+Why this validates through DuckDB's own parser (ADR-022)
+--------------------------------------------------------
+The first version of this guard was a hand-written string scanner: it stripped
+comments, masked string literals, split on top-level ``;`` and matched relation
+names with a regex. Every one of its holes was the same hole — **the scanner
+and the executor disagreed about where a string ended.** DuckDB understands
+dollar-quoting (``$a$…$a$``), escape strings (``e'\\''``) and quoted identifiers
+containing apostrophes; the scanner understood none of them. One unbalanced
+quote shifted the parity of everything after it, so the checks ran on text that
+did not resemble what DuckDB would execute. That let a query read the internal
+catalog, read tables outside the allow-list, and — by closing the guard's own
+``SELECT * FROM (…)`` wrapper early — smuggle extra statements past the
+single-statement rule and create objects on a ``read_only=True`` connection.
+
+A scanner can be patched construct by construct forever and stay one DuckDB
+release behind. So it was replaced: the statement is now parsed by **the same
+parser that will execute it**, and the checks run on the resulting syntax tree.
+Parser-vs-executor disagreement is not reduced here, it is structurally
+impossible.
 
 Design rules (do not relax these to "make a query pass" — fix the query):
 
-* one statement only (no stacked ``;`` queries);
-* it must be a ``SELECT`` / ``WITH`` read query;
-* a deny-list of write/DDL/catalog/filesystem keywords is rejected;
-* every referenced relation must be in the allow-list (CTE names excepted);
+* exactly one statement, established by the parser rather than by counting
+  semicolons in text;
+* it must be a ``SELECT`` / ``WITH`` read query — enforced by the fact that
+  DuckDB refuses to serialize anything else as a select statement;
+* every table in the tree must be in the allow-list (CTE names excepted);
+* every function in the tree must be in the allow-list. A CTE name **never**
+  exempts a function: DuckDB resolves ``name(`` to a function no matter what a
+  CTE is called, so allowing that would let ``WITH duckdb_settings AS (…)``
+  whitelist ``duckdb_settings()``;
 * the result is wrapped in an outer ``LIMIT`` so the model can never dump the
-  whole ledger.
+  whole ledger — and the wrapped text is re-parsed to prove it is still one
+  statement.
 
-The parser is intentionally small and string-literal aware: comments are
-stripped and statements are split *outside* of quoted strings, and keyword /
-relation matching runs against a copy with string contents masked, so a literal
-like ``WHERE name = 'DROP TABLE x'`` is not mistaken for an attack.
+What each layer actually protects. ``read_only=True`` protects *integrity*; it
+stops writes. It does **not** protect *confidentiality*: a read that reaches
+outside the ledger is still a read, and reading is what an LLM-composed query
+does. Confidentiality is held by this filter plus ``enable_external_access``
+being off on the connection. For two releases this module claimed "defense in
+depth" while the confidentiality half was a single layer.
 """
 
 from __future__ import annotations
 
-import re
+import json
+import threading
+from typing import Any
+
+import duckdb
 
 # Relations the agent is allowed to read: the dimensions, the facts, and the
 # analytics views built by data/generate.py. Keep in sync with the schema.
@@ -44,52 +74,252 @@ ALLOWED_RELATIONS: frozenset[str] = frozenset(
     }
 )
 
-# Whole-word tokens that must never appear in a query: writes, DDL, catalog and
-# transaction control, plus DuckDB filesystem/table functions that could read or
-# exfiltrate data outside the ledger. Matched case-insensitively with \b...\b.
-# Note: deliberately *not* listed are read-safe words that double as functions
-# (e.g. ``replace`` the string function); CREATE catches "CREATE OR REPLACE".
-DENY_KEYWORDS: tuple[str, ...] = (
-    # DML / DDL
-    "insert", "update", "delete", "drop", "create", "alter", "truncate",
-    "merge", "upsert", "grant", "revoke",
-    # catalog / session / transaction control
-    "attach", "detach", "copy", "export", "import", "install", "load",
-    "pragma", "set", "reset", "call", "use", "vacuum", "checkpoint",
-    "prepare", "execute", "deallocate", "begin", "start", "commit",
-    "rollback", "abort", "transaction",
-    # filesystem / table functions
-    "read_csv", "read_csv_auto", "read_parquet", "read_json", "read_json_auto",
-    "read_text", "read_blob", "parquet_scan", "glob", "sniff_csv",
-    "query_table", "system",
-)
-
-DEFAULT_MAX_ROWS = 200
-
-# Keywords that end a FROM/JOIN relation list (used by the relation scanner).
-_CLAUSE_KW = frozenset(
+# Read-safe functions the agent may call, in the CANONICAL names DuckDB's parser
+# reports — which are not always what was typed: `count(*)` arrives as
+# `count_star`, `extract(year FROM d)` as `date_part`, `now()` as
+# `current_timestamp`. Checking canonical names is the point: an attacker cannot
+# dodge the list by choosing a different spelling of the same function.
+#
+# This is an ALLOW-list on purpose. A deny-list of dangerous functions is blind
+# to everything nobody remembered to add, and DuckDB ships new table functions
+# every release. Anything absent is rejected with a named error, so a gap costs
+# a query, not the ledger. (ADR-022 — grow this list when a legitimate query is
+# refused; that is the designed failure direction.)
+ALLOWED_FUNCTIONS: frozenset[str] = frozenset(
     {
-        "where", "group", "order", "having", "limit", "offset", "union",
-        "intersect", "except", "on", "using", "join", "inner", "left",
-        "right", "full", "cross", "natural", "window", "qualify", "fetch",
-        "select", "from",
+        # aggregates
+        "count", "count_star", "sum", "avg", "mean", "min", "max", "median",
+        "mode", "product", "stddev", "stddev_pop", "stddev_samp", "var_pop",
+        "var_samp", "variance", "quantile", "quantile_cont", "quantile_disc",
+        "approx_count_distinct", "string_agg", "group_concat", "array_agg",
+        "list", "first", "last", "any_value", "bool_and", "bool_or", "corr",
+        "covar_pop", "covar_samp", "count_if", "histogram", "arg_min", "arg_max",
+        "sumkahan", "favg", "fsum",
+        # window
+        "row_number", "rank", "dense_rank", "percent_rank", "cume_dist",
+        "ntile", "lag", "lead", "first_value", "last_value", "nth_value",
+        # math
+        "abs", "round", "ceil", "ceiling", "floor", "sqrt", "pow", "power",
+        "exp", "ln", "log", "log10", "log2", "sign", "greatest", "least",
+        "trunc", "mod", "nextafter", "cbrt", "gcd", "lcm", "add", "subtract",
+        "multiply", "divide", "//",
+        # string
+        "lower", "upper", "length", "len", "trim", "ltrim", "rtrim", "substr",
+        "substring", "array_slice", "concat", "concat_ws", "replace",
+        "split_part", "string_split", "str_split", "starts_with", "ends_with",
+        "contains", "position", "instr", "left", "right", "lpad", "rpad",
+        "repeat", "reverse", "regexp_matches", "regexp_replace",
+        "regexp_extract", "regexp_full_match", "format", "printf", "initcap",
+        "nfc_normalize", "prefix", "suffix", "like_escape", "ilike_escape",
+        # date / time
+        "date_trunc", "datetrunc", "date_part", "datepart", "date_diff",
+        "datediff", "date_add", "age", "epoch", "epoch_ms", "strftime",
+        "strptime", "make_date", "make_time", "make_timestamp", "last_day",
+        "monthname", "dayname", "year", "month", "day", "hour", "minute",
+        "second", "millisecond", "microsecond", "dayofweek", "dayofmonth",
+        "dayofyear", "weekofyear", "week", "isodow", "quarter", "century",
+        "decade", "era", "time_bucket", "to_timestamp", "julian",
+        "current_date", "current_timestamp", "get_current_timestamp", "today",
+        "current_localtimestamp", "date_sub", "now",
+        # conditional / null handling / casts
+        "coalesce", "ifnull", "nullif", "nvl", "if", "typeof", "try_cast",
+        "try_strptime", "case",
+        # comparison / boolean operators the parser reports as functions
+        "and", "or", "not", "=", "!=", "<>", "<", "<=", ">", ">=", "+", "-",
+        "*", "/", "%", "~~", "!~~", "~~*", "!~~*",
+        # list / struct helpers used by analytical SQL
+        "to_days", "to_months", "to_years", "to_hours", "to_minutes",
+        "to_seconds", "to_weeks", "to_milliseconds", "to_microseconds",
+        "char_length", "character_length", "bit_length", "octet_length",
+        "unnest", "range", "generate_series", "list_value", "struct_pack",
+        "list_contains", "list_sort", "array_length", "row",
     }
 )
 
-# A token is a (possibly dotted / quoted) identifier or a structural char.
-_TOKEN_RE = re.compile(r'"[^"]*"(?:\.[\w$"]+)*|[A-Za-z_][\w$]*(?:\.[\w$]+)*|[(),]')
+# The ledger's own schema. A reference qualified with anything else — 
+# `information_schema`, `pg_catalog`, an attached database — is reaching for the
+# catalog, not for the data, and is refused by name.
+ALLOWED_SCHEMAS: frozenset[str] = frozenset({"main", "memory", "temp"})
 
-# CTE / WINDOW names introduced with `name AS (` — these are locally defined and
-# therefore exempt from the relation allow-list.
-_LOCAL_NAME_RE = re.compile(r'(?:\bwith\b|,)\s+("?[A-Za-z_]\w*"?)\s+as\s*\(', re.I)
+DEFAULT_MAX_ROWS = 200
 
-_DENY_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(k) for k in DENY_KEYWORDS) + r")\b", re.I
-)
+# Parsing needs a connection, but never a *data* connection: this one is
+# in-memory, empty, and hardened the same way the ledger is. It only ever sees
+# `json_serialize_sql`, which parses text and returns a tree — it does not plan,
+# bind or execute the statement under test.
+_PARSER_CONFIG: dict[str, str] = {
+    "enable_external_access": "false",
+    "autoinstall_known_extensions": "false",
+    "autoload_known_extensions": "false",
+    "allow_community_extensions": "false",
+}
+_parser_lock = threading.Lock()
+_parser_con: duckdb.DuckDBPyConnection | None = None
 
 
 class GuardrailError(ValueError):
     """Raised when a query violates the read-only / allow-list policy."""
+
+
+def _parser() -> duckdb.DuckDBPyConnection:
+    global _parser_con
+    if _parser_con is None:
+        _parser_con = duckdb.connect(":memory:", config=dict(_PARSER_CONFIG))
+    return _parser_con
+
+
+def _single_statement(sql: str) -> None:
+    """Reject anything that is not exactly one statement, per the parser.
+
+    Counting semicolons in text is what the previous implementation did, and it
+    is defeated by any quoting construct the counter does not model. The parser
+    cannot be lied to about its own statement boundaries.
+    """
+    try:
+        statements = duckdb.extract_statements(sql)
+    except duckdb.ParserException as exc:
+        raise GuardrailError(f"Query does not parse: {exc}") from exc
+    if len(statements) != 1:
+        raise GuardrailError(
+            f"Only a single statement is allowed (parsed {len(statements)})."
+        )
+
+
+def _syntax_tree(sql: str) -> dict[str, Any]:
+    """Parse `sql` to a syntax tree, or reject it.
+
+    ``json_serialize_sql`` only serializes SELECT statements. Every other
+    statement kind — INSERT, CREATE, PRAGMA, ATTACH, COPY, SET, PREPARE,
+    DELETE — comes back as an error, which is exactly the read-only check, made
+    by the parser instead of by a keyword list that has to guess.
+    """
+    with _parser_lock:
+        try:
+            raw = _parser().execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+        except duckdb.Error as exc:
+            raise GuardrailError(f"Query does not parse: {exc}") from exc
+    if not raw or not raw[0]:
+        raise GuardrailError("Query could not be parsed.")
+    tree = json.loads(raw[0])
+    if tree.get("error"):
+        raise GuardrailError(
+            "Only read-only SELECT / WITH queries are allowed "
+            f"({tree.get('error_type') or 'not a select statement'})."
+        )
+    return tree
+
+
+def _collect(
+    node: Any,
+    tables: set[str],
+    functions: set[str],
+    pseudo: set[str],
+    scope: frozenset[str] = frozenset(),
+) -> None:
+    """Walk the tree, resolving every table and function name *in its own scope*.
+
+    Three properties this has to hold, each learned from a break:
+
+    **Any node carrying a ``table_name`` is a relation reference.** Not just
+    ``BASE_TABLE``. ``SHOW``/``DESCRIBE`` parse as select statements whose source
+    is a ``SHOW_REF`` — same field, different node type — so keying the check on
+    the type let ``SHOW ALL TABLES`` enumerate the whole catalog past two empty
+    allow-lists. Read the field wherever it appears; classify afterwards.
+
+    **CTE names are scoped, not global.** ``scope`` extends only into the subtree
+    of the node that declares the CTE. Collecting every CTE name into one flat
+    set let a CTE declared inside a nested subquery exempt that table name in a
+    *sibling* branch, where DuckDB resolves it to the real table.
+
+    **A schema-qualified name is never satisfied by a CTE.** CTEs cannot be
+    schema-qualified, so ``main.internal_notes`` must clear the allow-list on its
+    own. Comparing a synthesised ``"schema.table"`` string against CTE names was
+    defeatable by *quoting a dot into a CTE name* — ``WITH "main.internal_notes"
+    AS (…)``. Qualified references now skip the CTE set entirely instead of
+    being compared against it.
+    """
+    if isinstance(node, dict):
+        # CTEs declared here are in scope for this subtree only — and NOT inside
+        # their own definitions. Walking the definitions with the full set in
+        # scope was a hole in both directions:
+        #
+        #   WITH leak AS (SELECT max(secret) FROM internal_notes),
+        #        internal_notes AS (SELECT 1) SELECT * FROM leak
+        #
+        # exempted a *forward-declared* name that SQL has not bound yet, and
+        #
+        #   WITH internal_notes AS (SELECT * FROM internal_notes) SELECT …
+        #
+        # exempted a CTE's own name inside its own body. Both read the real
+        # table. So each definition is validated against only the CTEs declared
+        # BEFORE it, which is what SQL actually binds.
+        #
+        # A CTE's own name is never in scope in its own body, `RECURSIVE` or
+        # not. That is not conservatism: measured on DuckDB 1.5.3, the anchor
+        # term of `WITH RECURSIVE internal_notes AS (SELECT secret FROM
+        # internal_notes UNION ALL …)` binds to the base table and returns its
+        # rows. The cost is that genuinely recursive CTEs are refused (the
+        # recursive term references the CTE name); the refusal is visible and
+        # a leak would not be. See ADR-022.
+        cte_map = node.get("cte_map")
+        declared_here: list[tuple[str, Any]] = []
+        if isinstance(cte_map, dict):
+            for entry in cte_map.get("map") or []:
+                if isinstance(entry, dict) and entry.get("key"):
+                    declared_here.append((str(entry["key"]).lower(), entry))
+
+        if declared_here:
+            visible = set(scope)
+            for cte_name, entry in declared_here:
+                # Validated against the CTEs declared before it — not itself.
+                _collect(entry, tables, functions, pseudo, frozenset(visible))
+                visible.add(cte_name)
+            scope = frozenset(visible)
+
+        kind = str(node.get("type") or "")
+        if kind == "TABLE_FUNCTION":
+            fn = (node.get("function") or {}).get("function_name")
+            if fn:
+                functions.add(str(fn).lower())
+        if node.get("function_name"):
+            functions.add(str(node["function_name"]).lower())
+
+        # Presence of the field, not truthiness of its value: `SHOW TABLES FROM
+        # main` is a SHOW_REF whose table_name is the empty string, and a
+        # truthiness test skips it into the clear.
+        if "table_name" in node:
+            bare = str(node.get("table_name") or "").lower()
+            schema = str(node.get("schema_name") or "").lower()
+            if kind != "BASE_TABLE":
+                # SHOW_REF covers two different things. A catalog listing
+                # (`SHOW ALL TABLES`, `SHOW DATABASES`) has no query sub-tree
+                # and enumerates the catalog — never legitimate. `DESCRIBE x` /
+                # `SUMMARIZE x` carry their target as a real sub-tree, so the
+                # relation allow-list checks it like any other reference and
+                # `DESCRIBE internal_notes` is refused on its own merits.
+                if node.get("query") is None:
+                    pseudo.add(kind.lower() or "unknown")
+            elif not bare:
+                pseudo.add(kind.lower() or "unknown")
+            elif schema and schema not in ALLOWED_SCHEMAS:
+                tables.add(f"{schema}.{bare}")
+            elif schema:
+                # Qualified against the ledger's own schema: check the bare name,
+                # and deliberately do NOT consult `scope`.
+                tables.add(bare)
+            elif bare not in scope:
+                tables.add(bare)
+
+        for key, value in node.items():
+            # `cte_map` was already walked above, each definition under its own
+            # narrower scope. Re-walking it here with the full scope would put
+            # every CTE name back in view inside its own body and undo that.
+            if key == "cte_map" and declared_here:
+                continue
+            _collect(value, tables, functions, pseudo, scope)
+    elif isinstance(node, list):
+        for value in node:
+            _collect(value, tables, functions, pseudo, scope)
 
 
 def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
@@ -103,184 +333,46 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     if max_rows <= 0:
         raise GuardrailError("max_rows must be positive.")
 
-    statements = _strip_comments_split(sql)
-    if not statements:
-        raise GuardrailError("Empty query after stripping comments.")
-    if len(statements) > 1:
+    # Trailing separators are cosmetic: "SELECT 1; ; " is one statement with
+    # noise after it. Strip semicolons AND the whitespace between them, then let
+    # the parser rule on what is left.
+    stmt = sql.strip()
+    while stmt and stmt[-1] in ";  \t\r\n":
+        stmt = stmt[:-1].rstrip()
+    if not stmt:
+        raise GuardrailError("Empty query after stripping separators.")
+
+    _single_statement(stmt)
+    tree = _syntax_tree(stmt)
+
+    tables: set[str] = set()
+    functions: set[str] = set()
+    pseudo: set[str] = set()
+    _collect(tree, tables, functions, pseudo)
+
+    if pseudo:
         raise GuardrailError(
-            "Only a single statement is allowed (no stacked ';' statements)."
+            "Catalog-listing statements are not allowed (" + ", ".join(sorted(pseudo)) + ")."
         )
 
-    stmt = statements[0]
-    masked = _mask_literals(stmt)
-    low = masked.lower()
-
-    if not re.match(r"^\s*(?:select|with)\b", low):
-        raise GuardrailError("Only read-only SELECT / WITH queries are allowed.")
-
-    deny = _DENY_RE.search(low)
-    if deny:
-        raise GuardrailError(f"Disallowed keyword: {deny.group(0).upper()}.")
-
-    local_names = _local_names(masked)
-    unknown = sorted(
-        r
-        for r in _referenced_relations(masked)
-        if r not in ALLOWED_RELATIONS and r not in local_names
-    )
+    unknown = sorted(t for t in tables if t not in ALLOWED_RELATIONS)
     if unknown:
         raise GuardrailError(
             "Relation(s) not in allow-list: " + ", ".join(unknown) + "."
         )
 
-    return f"SELECT * FROM (\n{stmt}\n) AS _guarded LIMIT {int(max_rows)}"
+    # NOTE: CTE names are deliberately NOT consulted here. A CTE named after a
+    # table function must not whitelist that function — see the module docstring.
+    unknown_fns = sorted(f for f in functions if f not in ALLOWED_FUNCTIONS)
+    if unknown_fns:
+        raise GuardrailError(
+            "Function(s) not in allow-list: " + ", ".join(unknown_fns) + "."
+        )
 
-
-# --------------------------------------------------------------------------- #
-# Internal: a tiny string-literal-aware SQL scanner.
-# --------------------------------------------------------------------------- #
-
-
-def _strip_comments_split(sql: str) -> list[str]:
-    """Remove comments and split on top-level ``;``, ignoring quoted strings.
-
-    Comments become a space (so they cannot glue two tokens together). Quoted
-    string and identifier contents are preserved verbatim.
-    """
-    out: list[str] = []
-    cur: list[str] = []
-    i, n = 0, len(sql)
-    while i < n:
-        ch = sql[i]
-        nxt = sql[i + 1] if i + 1 < n else ""
-        if ch == "'":  # single-quoted string literal
-            j = i + 1
-            cur.append("'")
-            while j < n:
-                c = sql[j]
-                cur.append(c)
-                if c == "'":
-                    if j + 1 < n and sql[j + 1] == "'":  # '' escape
-                        cur.append("'")
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                j += 1
-            i = j
-            continue
-        if ch == '"':  # double-quoted identifier
-            j = i + 1
-            cur.append('"')
-            while j < n:
-                c = sql[j]
-                cur.append(c)
-                j += 1
-                if c == '"':
-                    break
-            i = j
-            continue
-        if ch == "-" and nxt == "-":  # line comment
-            i += 2
-            while i < n and sql[i] != "\n":
-                i += 1
-            cur.append(" ")
-            continue
-        if ch == "/" and nxt == "*":  # block comment
-            i += 2
-            while i < n and not (sql[i] == "*" and i + 1 < n and sql[i + 1] == "/"):
-                i += 1
-            i += 2
-            cur.append(" ")
-            continue
-        if ch == ";":  # statement separator
-            out.append("".join(cur))
-            cur = []
-            i += 1
-            continue
-        cur.append(ch)
-        i += 1
-    out.append("".join(cur))
-    return [s.strip() for s in out if s.strip()]
-
-
-def _mask_literals(stmt: str) -> str:
-    """Return `stmt` with single-quoted string *contents* blanked to ``''``.
-
-    Used only for keyword / relation analysis so that data inside string
-    literals (e.g. a customer named "DROP TABLE x") never trips the guard.
-    """
-    out: list[str] = []
-    i, n = 0, len(stmt)
-    while i < n:
-        ch = stmt[i]
-        if ch == "'":
-            j = i + 1
-            while j < n:
-                if stmt[j] == "'":
-                    if j + 1 < n and stmt[j + 1] == "'":
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                j += 1
-            out.append("''")
-            i = j
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def _local_names(stmt: str) -> set[str]:
-    """Names defined locally by CTEs / WINDOW clauses (exempt from allow-list)."""
-    return {m.group(1).strip('"').lower() for m in _LOCAL_NAME_RE.finditer(stmt)}
-
-
-def _referenced_relations(stmt: str) -> set[str]:
-    """Best-effort set of relations referenced after FROM / JOIN.
-
-    Handles comma-separated lists, ``schema.table`` qualification, aliases and
-    derived-table subqueries (which are skipped, their inner FROMs handled by
-    the outer scan). This is the prompt-layer check; the read-only connection is
-    the authoritative backstop for anything the parser doesn't catch.
-    """
-    tokens = _TOKEN_RE.findall(stmt)
-    rels: set[str] = set()
-    i, n = 0, len(tokens)
-    while i < n:
-        if tokens[i].lower() in ("from", "join"):
-            j = i + 1
-            expect_rel = True
-            while j < n:
-                tok = tokens[j]
-                if expect_rel:
-                    if tok == "(":  # derived table — skip the balanced group
-                        depth, j = 1, j + 1
-                        while j < n and depth > 0:
-                            if tokens[j] == "(":
-                                depth += 1
-                            elif tokens[j] == ")":
-                                depth -= 1
-                            j += 1
-                        expect_rel = False
-                        continue
-                    if tok in (",", ")"):
-                        j += 1
-                        continue
-                    name = tok.strip('"').split(".")[-1].strip('"').lower()
-                    rels.add(name)
-                    expect_rel = False
-                    j += 1
-                    continue
-                if tok == ",":
-                    expect_rel = True
-                    j += 1
-                    continue
-                if tok.lower() in _CLAUSE_KW:
-                    break
-                j += 1
-            i = j
-            continue
-        i += 1
-    return rels
+    guarded = f"SELECT * FROM (\n{stmt}\n) AS _guarded LIMIT {int(max_rows)}"
+    # The wrapper is the last thing an attacker can aim at: closing it early and
+    # appending statements is how the old guard was escaped. Re-parsing the
+    # finished text proves that what will actually be executed is still exactly
+    # one statement.
+    _single_statement(guarded)
+    return guarded

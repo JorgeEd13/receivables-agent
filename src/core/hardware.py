@@ -99,7 +99,7 @@ class HardwareProfile:
         The 20% headroom keeps the OS and this very process (agent + Chroma)
         from being starved when the model loads on CPU.
         """
-        if self.has_gpu:
+        if self.has_gpu and self.gpu_vram_gb is not None:
             return float(self.gpu_vram_gb)
         return round(self.ram_total_gb * 0.80, 1)
 
@@ -155,8 +155,12 @@ def _detect_ram() -> tuple[float, float]:
             text=True,
             timeout=5,
         )
-        total_kb = int(re.search(r"TotalVisibleMemorySize=(\d+)", out).group(1))
-        free_kb = int(re.search(r"FreePhysicalMemory=(\d+)", out).group(1))
+        total_m = re.search(r"TotalVisibleMemorySize=(\d+)", out)
+        free_m = re.search(r"FreePhysicalMemory=(\d+)", out)
+        if total_m is None or free_m is None:
+            raise ValueError("wmic returned no memory figures")
+        total_kb = int(total_m.group(1))
+        free_kb = int(free_m.group(1))
         return round(total_kb / 1024**2, 1), round(free_kb / 1024**2, 1)
     except Exception:
         pass

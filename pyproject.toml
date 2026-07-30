@@ -35,8 +35,52 @@ ollama = ["langchain-ollama>=0.2"]
 # needed by the web/API container, so it's optional.
 mcp = ["mcp>=1.2"]
 # Test/dev tooling. httpx powers FastAPI's TestClient (API tests run offline).
-dev = ["pytest", "httpx>=0.27"]
+dev = ["pytest", "httpx>=0.27", "ruff>=0.16", "mypy>=1.14"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+# --------------------------------------------------------------------------- #
+# Static analysis. Enforced in CI — see .github/workflows/ci.yml.
+# The rule set is curated rather than "ALL": every rule here is one the repo
+# actually passes, so a red gate always means a new defect, never a backlog.
+# Widening the set is a deliberate change, not a wish (see docs/DECISIONS.md).
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM", "RET", "PIE", "RUF"]
+ignore = [
+    "RUF001",  # ambiguous unicode in strings — the reports use box-drawing glyphs
+    "RUF002",
+    "RUF003",
+    "SIM108",  # ternary is not always more readable than if/else
+    # E501 is deliberately OFF. `ruff format` is NOT enforced here: reformatting
+    # ~33k lines would rewrite history for `git blame`, and the commit log is a
+    # working engineering record. Without a formatter, line length is the least
+    # informative rule in the set, and every real violation left is an embedded
+    # CSS/JS block, a base64 asset or a test fixture — none of which read better
+    # wrapped. The rules that catch defects (F, B, UP, SIM, RET, C4, RUF) stay on.
+    "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+ignore_missing_imports = true
+# Ratchet, not a wall: these are the levels the code passes TODAY and CI holds.
+# Tightening happens per-module (see [[tool.mypy.overrides]]) so the gate stays
+# green and every step forward is a real, reviewed change.
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true

@@ -5,6 +5,109 @@ decision, consequences. Kept short.
 
 ---
 
+## ADR-022 — The SQL guardrail validates through DuckDB's own parser
+
+**Status:** Accepted · 2026-07-30 · supersedes the scanner half of ADR-003
+
+**Context.** An external review of this repo found that `sql_guard` accepted
+`SELECT * FROM (SELECT * FROM secrets) t`: the relation allow-list never looked
+inside a derived table. Patching that scan hole led to a three-round adversarial
+review by an instance with no knowledge of the design, whose only job was to
+break the guarantee. It found progressively worse things, and the pattern was
+always the same class of defect — **the hand-written scanner and DuckDB
+disagreed about what the query said.**
+
+What that disagreement actually permitted, all verified end-to-end against a
+real connection, not argued on paper:
+
+- `_mask_literals` modelled `'…'` but not dollar-quoting (`$a$…$a$`), escape
+  strings (`e'\''`) or quoted identifiers containing an apostrophe. Any of the
+  three shifted quote parity, so **the entire rest of the statement was blanked
+  out of every check** while the original text — unblanked — was what executed.
+  That read `duckdb_settings()`, the ledger's own file path, and tables outside
+  the allow-list.
+- The same desync hid `;` from the statement splitter. Closing the guard's own
+  `SELECT * FROM (…)` wrapper early and reopening it smuggled extra statements
+  through, and `CREATE TEMP TABLE` / `TEMP VIEW` / `TEMP MACRO` / `PREPARE` all
+  **succeeded on a `read_only=True` connection** and persisted for the session.
+- A CTE named after a table function whitelisted that function
+  (`WITH duckdb_settings AS (…) SELECT … FROM duckdb_settings()`).
+- `"current_setting"('memory_limit')` — a quoted function name — was invisible
+  to the regex that looked for `name(`.
+
+**Decision.** Stop scanning text. Parse the statement with **the same parser
+that will execute it** (`duckdb.extract_statements` for statement boundaries,
+`json_serialize_sql` for the tree) and run every check over the resulting
+syntax tree. Parser-versus-executor disagreement is not reduced by this, it is
+structurally impossible.
+
+Four checks over the tree, each one shaped by an attack that beat its
+predecessor:
+
+1. **Exactly one statement**, established by the parser, not by counting `;`.
+   The wrapped output is re-parsed too, so the wrapper cannot be escaped.
+2. **Read-only by construction.** `json_serialize_sql` serializes only SELECT
+   statements; every other kind returns an error. That replaces a keyword
+   deny-list that had to guess.
+3. **Relations**: any node carrying a `table_name` is a relation reference —
+   not just `BASE_TABLE`. `SHOW`/`DESCRIBE` parse as select statements whose
+   source is a `SHOW_REF` carrying the same field, so keying on the node type
+   let `SHOW ALL TABLES` enumerate the catalog past two empty allow-lists.
+   Catalog listings (no query sub-tree) are refused outright; `DESCRIBE x` /
+   `SUMMARIZE x` carry their target as a real sub-tree and are checked like any
+   other reference.
+4. **Functions**: an allow-list of canonical names, because a deny-list is
+   blind to every function nobody remembered and DuckDB ships new table
+   functions every release. CTE names never exempt a function.
+
+**CTE scoping is lexical, and a CTE never covers itself.** A flat set of CTE
+names let one declared inside a nested subquery exempt that table name in a
+*sibling* branch; walking the `WITH` definitions with the full set in scope let
+a *forward-declared* name, and a CTE's *own* name, exempt a real table. Each
+definition is now validated against only the CTEs declared before it.
+
+A CTE's own name is never in scope in its own body, `RECURSIVE` or not. This is
+measured, not cautious: on DuckDB 1.5.3 the **anchor** term of
+`WITH RECURSIVE internal_notes AS (SELECT secret FROM internal_notes UNION ALL …)`
+binds to the base table and returns its rows. The exemption cannot be made safe
+by restricting it to the recursive form.
+
+**Schema qualification never consults the CTE set.** CTEs cannot be
+schema-qualified, so `main.internal_notes` must clear the allow-list on its own.
+The previous approach compared a synthesised `"schema.table"` string against CTE
+names, which was defeated by quoting a dot into a CTE name
+(`WITH "main.internal_notes" AS (…)`).
+
+**Consequences.**
+
+- **Positive.** The whole class of scanner/executor disagreement is gone. The
+  guard also became *less* restrictive where it was wrong: `EXTRACT(year FROM
+  due_date)`, `SUBSTRING … FROM … FOR`, `TRIM(BOTH … FROM …)`, `CAST(x AS
+  DECIMAL(18,2))`, `WITH RECURSIVE`, `WITH t(a) AS`, `now()`, `INTERVAL 30 DAY`
+  and schema-qualified references to allow-listed tables were all being refused
+  by the old relation scanner, which read the `FROM` inside `EXTRACT` as a
+  relation list. `INTERVAL n DAY` is *the* aging idiom for a receivables agent.
+- **Negative.** Genuinely recursive CTEs are refused (see above). Fixing that
+  properly means resolving names against the real schema, not a name list.
+- **Negative.** The function allow-list will occasionally refuse a legitimate
+  query. That is the designed failure direction: a gap costs a query, not the
+  ledger. Grow the list when it happens.
+- **Correction to ADR-003.** That ADR called the read-only connection "the
+  authoritative half" of a defense-in-depth design. `read_only=True` protects
+  *integrity*, not *confidentiality* — every bypass above was a **read**, and
+  reading is what an LLM-composed query is made of. The connection now also sets
+  `enable_external_access=false`, extension autoloading off and
+  `lock_configuration=true`; that is the layer that actually stops exfiltration,
+  and it held on every probe across all three rounds (filesystem, network, other
+  database files and secrets were unreachable throughout).
+- **Process.** The tests were written by an instance that did not write the code
+  and was not told how it worked, and were required to produce a failing repro
+  and to prove they could go red by mutation. Three rounds, each finding what
+  the previous fix introduced. `tests/test_sql_guard_adversarial.py` is that
+  work, kept as a regression floor.
+
+---
+
 ## ADR-015 — Demo product-polish: light/dark theme + EN/PT-BR i18n (Phase 9)
 
 **Status:** Accepted · 2026-07-06

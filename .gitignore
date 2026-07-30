@@ -10,10 +10,10 @@ venv/
 .env
 *.key
 
-# Local-only corporate CA bundle used to make `docker build` work behind a TLS-
-# inspecting proxy (see docs/DEPLOY.md "Building behind a TLS-inspecting proxy").
+# Local-only CA bundle used to make `docker build` work on a network that
+# terminates TLS (see Dockerfile.hf — the COPY is an optional glob).
 # Never committed and never needed on HF's clean runners — a local dev artifact only.
-corp-ca.crt
+ca.crt
 
 # Generated data artifacts
 data/*.duckdb

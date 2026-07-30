@@ -148,7 +148,7 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > ledger" → "Reading the collections policy"), an **elapsed-seconds** counter, and an honest
 > "tiny model on a free CPU, it's working not stuck" hint after 6 s. 3 new streaming API
 > tests. **Suite 113 green.** NOTE: local container verification is impractical here (the
-> throttled corp proxy makes the in-container `ollama pull` take ~1 h); streaming is
+> throttled proxy makes the in-container `ollama pull` take ~1 h); streaming is
 > unit-tested + will be verified LIVE on HF (clean fast network). **Still deferred (plan):
 > bake the plan-cache at build (every redeploy currently re-warms → slow window), trim the
 > tiny-model prompt (~2500 tok/turn → the real speed lever), firm up tool-routing so
@@ -157,14 +157,14 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > **2026-07-03 — Phase 6 LAYER 3 LIVE.** Space deployed via a `space-deploy` branch
 > (HF front-matter README + tiny-Ollama image as the literal `Dockerfile` + `.gitattributes`
 > LFS-tracking `*.png`/`*.gif` — HF rejects plain-git binaries). HF builds `Dockerfile.hf`
-> on its clean runners (the corp-CA build step no-ops there) and it serves. **Demo-UX bugs
+> on its clean runners (the optional-CA build step no-ops there) and it serves. **Demo-UX bugs
 > caught by real browser testing (both fixed):** (a) the UI's *first suggested* question was
 > NOT in the plan-cache seed set → clicking it fell through to the slow tiny model and hung
 > on "Thinking…" — fixed by making `web/src/App.jsx` SUGGESTIONS mirror `data/seed_plan_cache.py`
 > exactly (every chip is now a ~3 s cache hit); (b) added an honest latency hint (chips =
 > instant/cached, typed = live tiny model, may take up to a minute) so "Thinking…" never
 > reads as hung. **Deploy gotchas (portfolio-worthy findings, portable to the other Spaces):** git &
-> the Docker daemon trust the corp CA (push/pull work) even though `curl`/schannel fails
+> the Docker daemon can trust a supplied CA (push/pull work) even though `curl`/schannel fails
 > revocation; HF binaries need LFS; `git lfs migrate` rewrites shared history → keep it OFF
 > `main` (had to hard-reset local `main` to the clean `origin/main` after a leak; origin was
 > never polluted).
@@ -180,14 +180,14 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > `docs/DEPLOY.md`, ADR-012. **Built + ran end-to-end here on Docker Desktop.**
 >
 > **Findings from actually building it (each fixed):** (1) `docker build` pip/npm hit a
-> **TLS-intercepting corporate proxy** on the build network — the daemon pulls base images
-> fine, but installs *inside* the build don't trust the interception CA. Fix: OPTIONAL
-> `corp-ca.cr[t]` (glob) COPY’d in + `update-ca-certificates`; **git-ignored, never
+> a **network that terminates TLS** — the daemon pulls base images
+> fine, but installs *inside* the build don't trust the terminating CA. Fix: OPTIONAL
+> `ca.cr[t]` (glob) COPY’d in + `update-ca-certificates`; **git-ignored, never
 > shipped**; a NO-OP on HF's clean runners.
 > (2) Ollama installer needs **`zstd`** (slim image lacks it). (3) `--select` prints TWO
 > stdout lines (`OLLAMA_MODEL=` **and** `HAS_GPU=`) → the entrypoint must grep just the
 > model line. (4) The runtime **ONNX embedding download** (ChromaDB MiniLM) also hit the
-> MITM → set `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` to the system bundle
+> terminating CA → set `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` to the system bundle
 > (AFTER pip, so it doesn't bust the cached dep layer); verified live: `EMBEDDING_OK
 > dim=384`. (5) **UX fix:** warming 8 seed Qs on the tiny CPU model is slow (~2 tok/s,
 > ~25 s/answer) — doing it *before* serving left `/api/health`+UI dead for minutes → moved
@@ -283,7 +283,7 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > (eval pass-rate + one latency) are recorded **nowhere** yet — they need a live run.
 > NOT done on the production desktop (i3 / 8 GB / no GPU; Ollama server was down) —
 > per the compute split, inference belongs on the **personal Linux notebook** (GPU,
-> normal network, no TLS MITM). Dedicated session to do, with full context already
+> normal network, no TLS termination). Dedicated session to do, with full context already
 > here + in `docs/DEMO.md` §6:
 > 1. On the notebook: `ollama serve` + pull `qwen2.5:7b` (or `llama3.1`); `pip install -e ".[ollama,gemini,data,dev]"`; `python data/generate.py` (build the ledger).
 > 2. `python -m evals.run` → record the **pass-rate** (e.g. "7/7 golden questions pass").
@@ -357,7 +357,7 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
   - Ran **outside Docker** (the repo's intended Ollama path): host `uvicorn`
     reads `.env` (`PRIMARY_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434`),
     `web/` built with `VITE_API_KEY` matching `APP_API_KEY`. The one-time ONNX
-    MiniLM embedding download succeeded (no MITM on this network).
+    MiniLM embedding download succeeded (no TLS termination on this network).
   - **Gotcha found & documented:** `docker-compose.yml` pins `PRIMARY_PROVIDER:
     gemini` in its `environment:` block, which **overrides `.env`** — Compose only
     uses the root `.env` for `${VAR}` *substitution*, it is not injected into the
@@ -471,10 +471,10 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 
 ## Next
 - **Ship gate (do first):** record `docs/demo.gif` — full step-by-step in
-  [`docs/DEMO.md`](DEMO.md). **Must run on a normal network, not a corporate /
-  sandboxed one:** TLS interception there blocks both the Gemini API and the
+  [`docs/DEMO.md`](DEMO.md). **Must run on a network that does not terminate
+  TLS:** termination blocks both the Gemini API and the
   one-time ONNX embedding download (verified — same cert failure as npm). The
-  personal Linux notebook is the right host (no MITM; GPU for local Ollama if
+  personal Linux notebook is the right host (no TLS termination; GPU for local Ollama if
   preferred). That GIF + the repo is the "shipped link". Optionally deploy to a
   Hugging Face Space (Docker SDK; secrets `GEMINI_API_KEY`, `APP_API_KEY`,
   build-arg `VITE_API_KEY`; `PRIMARY_PROVIDER=gemini`).

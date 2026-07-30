@@ -125,7 +125,7 @@ ledger; non-root UID 1000; pins `OLLAMA_MODEL=qwen2.5:1.5b` for a deterministic 
 via a `space-deploy` branch (HF front-matter README + the image as the literal `Dockerfile` +
 `.gitattributes` LFS-tracking `*.png`/`*.gif`). Honest security + latency banners in DEPLOY.md
 and the UI. **LIVE: https://jorgeed-receivables-agent.hf.space.** Build gotchas (each fixed,
-Findings worth writing up: corp-CA needed for in-build pip/npm/ONNX (git-ignored, no-op on HF); `zstd`; the ONNX
+Findings worth writing up: an optional CA needed for in-build pip/npm/ONNX on TLS-terminating networks (git-ignored, no-op on HF); `zstd`; the ONNX
 embedder must be baked into **appuser's** cache (root-download → runtime re-download corrupted
 = `INVALID_PROTOBUF` crash).
 

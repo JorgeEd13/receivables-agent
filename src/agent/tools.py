@@ -120,10 +120,16 @@ def make_search_policy_tool(
 
     def search_policy(query: str) -> str:
         result = collection.query(query_texts=[query], n_results=k)
+        raw_docs, raw_metas = result["documents"], result["metadatas"]
+        if raw_docs is None or raw_metas is None:
+            return "Policy search returned no documents."
         ids = result["ids"][0]
-        documents = result["documents"][0]
-        metadatas = result["metadatas"][0]
-        distances = (result.get("distances") or [[None] * len(ids)])[0]
+        documents = raw_docs[0]
+        metadatas = raw_metas[0]
+        raw_distances = result.get("distances")
+        distances: list[float | None] = (
+            list(raw_distances[0]) if raw_distances else [None] * len(ids)
+        )
 
         results = [
             {

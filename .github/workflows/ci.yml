@@ -1,0 +1,56 @@
+name: CI
+
+# This repo had no workflow at all until ADR-022: the tests and the guardrail
+# suite only ever ran when someone remembered to run them locally. The SQL guard
+# is the security surface of this project — it needs a gate that runs whether or
+# not anyone remembers.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install (package + dev extras)
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: ruff
+        run: python -m ruff check .
+      - name: mypy
+        run: python -m mypy
+
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install (package + dev extras)
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      # Offline by construction: no LLM provider extra is installed, so a test
+      # that reaches for a live model fails here instead of passing quietly on a
+      # machine that happens to have Ollama running.
+      - name: Run tests (offline)
+        run: python -m pytest -q
+
+      # The guardrail suite is called out separately so a break in the security
+      # surface is legible in the run list, not buried in a count of 189.
+      - name: Guardrail suite (security surface)
+        run: python -m pytest tests/test_sql_guard.py tests/test_sql_guard_adversarial.py -q

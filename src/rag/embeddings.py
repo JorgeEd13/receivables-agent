@@ -14,6 +14,8 @@ found.
 
 from __future__ import annotations
 
+from typing import cast
+
 import hashlib
 import re
 
@@ -40,7 +42,11 @@ class DeterministicEmbeddingFunction(EmbeddingFunction[Documents]):
         self._dim = dim
 
     def __call__(self, input: Documents) -> Embeddings:
-        return [self._embed(text) for text in input]
+        # Chroma's `Embeddings` alias is list[np.ndarray], but the runtime
+        # accepts plain float lists and that is what this deterministic stub
+        # produces. Casting states the stub/runtime mismatch instead of hiding
+        # it behind a bare ignore.
+        return cast(Embeddings, [self._embed(text) for text in input])
 
     def _embed(self, text: str) -> list[float]:
         vec = [0.0] * self._dim

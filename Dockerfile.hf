@@ -25,15 +25,15 @@
 FROM node:20-slim AS web
 WORKDIR /web
 
-# Optional: trust a local corporate CA so `npm install` works behind a TLS-
-# inspecting proxy. The `corp-ca.cr[t]` glob makes the file OPTIONAL — it is
-# copied if present (local dev) and silently skipped on HF's clean runners (where
-# it doesn't exist and isn't needed). corp-ca.crt is git-ignored, never shipped.
-COPY corp-ca.cr[t] /usr/local/share/ca-certificates/corp-ca.crt
-RUN if [ -s /usr/local/share/ca-certificates/corp-ca.crt ]; then \
+# Optional: trust a locally-supplied CA so `npm install` works on a network that
+# terminates TLS. The `ca.cr[t]` glob makes the file OPTIONAL — it is copied if
+# present and silently skipped on HF's clean runners (where it doesn't exist and
+# isn't needed). The cert is git-ignored, never shipped.
+COPY ca.cr[t] /usr/local/share/ca-certificates/ca.crt
+RUN if [ -s /usr/local/share/ca-certificates/ca.crt ]; then \
       apt-get update && apt-get install -y --no-install-recommends ca-certificates \
       && update-ca-certificates \
-      && npm config set cafile /usr/local/share/ca-certificates/corp-ca.crt \
+      && npm config set cafile /usr/local/share/ca-certificates/ca.crt \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -61,18 +61,18 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional: trust a local corporate CA so pip/curl/ollama-install AND the runtime
+# Optional: trust a locally-supplied CA so pip/curl/ollama-install AND the runtime
 # Python TLS calls (ChromaDB/huggingface_hub fetching the one-time ONNX embedding
-# model at startup) work behind a TLS-inspecting proxy. `corp-ca.cr[t]` is OPTIONAL
-# (glob) — present in local dev, absent (and unneeded) on HF's clean runners.
+# model at startup) work on a network that terminates TLS. `ca.cr[t]` is OPTIONAL
+# (glob) — supplied where needed, absent (and unneeded) on HF's clean runners.
 # git-ignored, never shipped.
 #
 # Pointing pip at the standard system bundle (/etc/ssl/certs/ca-certificates.crt)
-# is a NO-OP on HF (that's already the default bundle there) and the fix locally,
-# because the conditional step below merges the corp CA INTO that same bundle.
-COPY corp-ca.cr[t] /usr/local/share/ca-certificates/corp-ca.crt
+# is a NO-OP on HF (that's already the default bundle there) and the fix where a
+# CA is supplied, because the conditional step below merges it INTO that bundle.
+COPY ca.cr[t] /usr/local/share/ca-certificates/ca.crt
 ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt
-RUN if [ -s /usr/local/share/ca-certificates/corp-ca.crt ]; then \
+RUN if [ -s /usr/local/share/ca-certificates/ca.crt ]; then \
       update-ca-certificates \
       && pip config set global.cert /etc/ssl/certs/ca-certificates.crt; \
     fi
