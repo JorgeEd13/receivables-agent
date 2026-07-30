@@ -72,6 +72,16 @@ measured, not cautious: on DuckDB 1.5.3 the **anchor** term of
 binds to the base table and returns its rows. The exemption cannot be made safe
 by restricting it to the recursive form.
 
+**Correction (2026-07-30, from the claim audit).** An earlier draft of this ADR
+said "recursive CTEs are refused". That is **not what the code does**, and the
+imprecision matters. There is no recursion-specific rule at all: a self-reference
+is simply checked against the relation allow-list like any other name. So
+`WITH RECURSIVE t AS (… FROM t …)` is refused because `t` is not an allow-listed
+relation, while `WITH RECURSIVE invoices AS (… FROM invoices …)` is **accepted** —
+`invoices` is on the list, and the anchor binding to the real table reads data the
+agent is allowed to read anyway. The accurate statement is: **a recursive CTE works
+only when its name is an allow-listed relation, and is refused otherwise.**
+
 **Schema qualification never consults the CTE set.** CTEs cannot be
 schema-qualified, so `main.internal_notes` must clear the allow-list on its own.
 The previous approach compared a synthesised `"schema.table"` string against CTE
@@ -100,6 +110,20 @@ names, which was defeated by quoting a dot into a CTE name
   `lock_configuration=true`; that is the layer that actually stops exfiltration,
   and it held on every probe across all three rounds (filesystem, network, other
   database files and secrets were unreachable throughout).
+- **OPEN — availability is not covered, and the outer LIMIT is not a defence.**
+  The guard bounds *what can be read*, not *how much work a query may do*. The
+  claim audit demonstrated three accepted queries that never return:
+  `WITH RECURSIVE invoices(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM invoices
+  WHERE n < 100000000) SELECT count(*) FROM invoices` (killed at 60s),
+  `SELECT repeat('a', 1000000000) FROM invoices`, and a six-way self-cartesian
+  join. `SELECT * FROM (…) LIMIT 200` caps *rows returned*, not *rows computed*,
+  so it stops none of them. Confidentiality held under every one of the ~13
+  further vectors thrown at it, but a public demo that any visitor can hang is a
+  real gap on a surface this ADR calls the priority security surface. Fixing it
+  needs a design decision — DuckDB has no statement timeout, and
+  `lock_configuration=true` deliberately prevents setting one after connect, so
+  the options are an interrupt from a watchdog thread, a row/row-scan budget, or
+  running the query in a killable subprocess. Queued, not silently accepted.
 - **Process.** The tests were written by an instance that did not write the code
   and was not told how it worked, and were required to produce a failing repro
   and to prove they could go red by mutation. Three rounds, each finding what

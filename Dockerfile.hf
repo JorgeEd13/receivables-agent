@@ -87,7 +87,7 @@ RUN pip install --no-cache-dir -r requirements-hf.txt
 
 # Point the runtime Python TLS stack at the system CA bundle so BUILD-time TLS
 # calls (the one-time ONNX MiniLM embedding download during the curated cache bake
-# below) AND runtime calls verify behind a TLS-inspecting proxy locally. A NO-OP on
+# below) AND runtime calls verify where TLS is terminated. A NO-OP on
 # HF (that IS the default bundle there). Set AFTER pip so it can't invalidate the
 # cached dependency layer, but BEFORE the seed step that needs it.
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \

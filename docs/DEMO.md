@@ -2,7 +2,7 @@
 
 The README embeds `docs/demo.gif`. This is the one step that must run on a real
 machine with a GUI and unrestricted internet — it can't be done in a sandboxed /
-corporate-proxy environment (TLS interception blocks both the Gemini API and the
+network that terminates TLS (interception blocks both the Gemini API and the
 one-time ONNX embedding-model download). Use a machine on a normal network; a
 free-tier `GEMINI_API_KEY` is enough (or local Ollama with a tool-capable model).
 

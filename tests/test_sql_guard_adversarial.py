@@ -943,6 +943,13 @@ def test_r3_near_miss_attacks_stay_rejected(sql: str, label: str) -> None:
 # Two cases in this file originally asserted that recursive CTEs are accepted.
 # They are now refused, and that is a decision, not a regression.
 #
+# PRECISION (2026-07-30, from the claim audit): "recursive CTEs are refused" is
+# too broad and was corrected in ADR-022. There is no recursion-specific rule.
+# A self-reference is checked against the relation allow-list like any other name,
+# so `WITH RECURSIVE t AS (… FROM t …)` is refused because `t` is not allow-listed,
+# while `WITH RECURSIVE invoices AS (… FROM invoices …)` is ACCEPTED. The cases
+# below use a non-allow-listed name, which is why they are refused.
+#
 # The reason is measured, not assumed. On DuckDB 1.5.3 a CTE's own name inside
 # its own body binds to a real base table of that name — including under
 # RECURSIVE, where the *anchor* term resolves to the table while only the

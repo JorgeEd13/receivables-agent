@@ -41,6 +41,12 @@ relation scanner read the `FROM` inside `EXTRACT` as a relation list.
 workflow this repo has ever had** — there was none, so nothing ran unless someone remembered —
 plus ruff + mypy gates, both clean.
 
+> ⚠️ **OPEN — availability.** The guard bounds what can be READ, not how much WORK a query
+> may do. `WITH RECURSIVE invoices(n) AS (… n < 100000000) …`, `repeat('a', 1000000000)` and a
+> six-way self-cartesian join are all **accepted** and never return; the outer `LIMIT 200` caps
+> rows *returned*, not rows *computed*. Confidentiality held under every vector tried.
+> Needs a design call (watchdog interrupt / row budget / killable subprocess) — see ADR-022.
+
 > ⚠️ **OPEN — the live demo still runs the vulnerable guard.** `space-deploy` is **43 commits
 > behind `main`** (drifting since Phase 6). `git push origin` does not deploy the HF Space. This
 > needs a dedicated session: the cherry-pick could not be validated here because checking out
