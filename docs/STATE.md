@@ -44,8 +44,8 @@ FOR`, `TRIM(BOTH … FROM …)`, `DECIMAL`/`VARCHAR` casts, `WITH t(a)`, `now()`
 DAY`** and schema-qualified references to allow-listed tables were all being refused. The old
 relation scanner read the `FROM` inside `EXTRACT` as a relation list.
 
-**272 tests** (135 pre-existing + 126 adversarial kept as a regression floor + 11 from the
-catalog fix below). **First CI
+**291 tests** (135 pre-existing + 126 adversarial kept as a regression floor + 11 from the
+catalog fix below + 19 from the normalization fix below). **First CI
 workflow this repo has ever had** — there was none, so nothing ran unless someone remembered —
 plus ruff + mypy gates, both clean.
 
@@ -76,6 +76,42 @@ so it stayed green with the hole wide open. The new R4 block uses payloads where
 the bare name are both allow-listed, so only the catalog check can refuse them, and asserts on
 the **message**: end-to-end blocking proves nothing here, since a catalog that does not exist is
 refused by DuckDB regardless of the guard.
+
+**2026-07-30 — the guard executed the caller's text, not the tree it validated (fixed, ADR-022
+amendment).** Same blind audit, two false positives the product pays for:
+
+- `SELECT name || ' x' FROM customers` was **refused** on `||` while `concat(name, ' x')`
+  passed — the same operation, two spellings, decided differently. `^` was missing against
+  `pow`/`power`, which are both listed. Both added; string concatenation is the most common
+  idiom in a collections report. The other 24 operator-named functions stay off the list on
+  purpose (all 28 are `function_type = 'scalar'`, so none of them could read a file either way).
+- `SELECT count(*) FROM invoices; -- total` was **refused** with a DuckDB syntax error about
+  `LINE 2` — the guard's own wrapper. A loop peeled trailing separators off the text by hand and
+  peeled only what was literally last, so the `;` travelled into `SELECT * FROM (…)` and broke it
+  there. A trailing comment is something a model writes constantly.
+
+**The repair replaced the text handling instead of patching it:** the statement that gets wrapped
+is now **printed by DuckDB from the validated tree** (`json_deserialize_sql`), and the printed
+text is re-parsed and compared with that tree before anything is wrapped. Comments and separators
+are lexical — they never reach a tree, so they cannot come out of a print. Measured before
+adopting: over every payload both guard suites accept, **27 of 27** round-trip to an identical
+tree (dropping `query_location` offsets), with identical collected names, idempotently. The
+peeling loop is gone; the caller's text now reaches nothing but the parser.
+
+**Two mutation results recorded because they are the unflattering ones:** dropping the fixed-point
+comparison leaves the suite green except one test that has to fake a lying printer, and the branch
+that rephrases a wrapper failure is unreachable by any real payload. Both are insurance against a
+future DuckDB release or refactor, and neither can be proved by a query — so both say so in the
+code rather than posing as live checks.
+
+> ⚠️ **OPEN — the same leak through the execution path.** An error raised while *executing* the
+> guarded query still returns the wrapper's line numbering to the model, via `tools.py` and
+> `mcp_server/server.py`: `Binder Error: … LINE 2: SELECT count_star() FROM customers GROUP BY
+> missing`. Severity is product quality, not confidentiality — this repo is public, so the
+> wrapper's shape is not a secret; the cost is that a model trying to self-correct is handed a
+> line number into a query it did not compose. Fixing it means stripping the `LINE n:` echo while
+> keeping the binder's message (which the model *does* need, e.g. "Candidate bindings"), in two
+> files that belong to the agent-tools layer rather than the guard.
 
 > ⚠️ **OPEN — availability.** The guard bounds what can be READ, not how much WORK a query
 > may do. `WITH RECURSIVE invoices(n) AS (… n < 100000000) …`, `repeat('a', 1000000000)` and a

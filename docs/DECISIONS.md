@@ -122,6 +122,72 @@ tests red; replacing it with an allow-list that admits `memory` and `ledger` tur
 and only **1** if the message assertion is removed along with it, which is what
 that assertion is there to hold.
 
+**Amendment (2026-07-30, same audit) — the executed statement is printed from
+the validated tree, not copied from the caller.** The guard validated a *tree*
+and executed a *string*, and the gap between them was bridged by hand: a loop
+peeled trailing separators off the caller's text so that pasting it into
+`SELECT * FROM (…) LIMIT n` would still parse. It peeled only what was literally
+last, so a semicolon followed by anything survived into the wrapper and died
+there:
+
+```
+SELECT count(*) FROM invoices; -- total
+  -> was REFUSED: Parser Error: syntax error at or near ";"
+     LINE 2: SELECT count(*) FROM invoices; -- total
+```
+
+A trailing comment is something a language model writes constantly, and the
+refusal it got back was a syntax error about line 2 of a text it never wrote.
+The repair is not a better peeling loop — that is the scanner mistake one level
+down. `json_deserialize_sql` asks DuckDB to print the statement back from the
+tree that just passed every check, and **that** is what gets wrapped. Comments
+and separators are lexical: they never reach a tree, so they cannot come out of
+a print. The printed text is parsed again and its tree compared with the
+validated one; a mismatch is refused rather than executed, so a printer bug in a
+future DuckDB release costs a query instead of silently making the statement
+that runs differ from the statement that was checked. The caller's text now
+reaches nothing but the parser.
+
+Round-trip fidelity was measured before adopting it, not assumed: over every
+payload both guard suites accept, **27 of 27** print-and-reparse to a tree
+identical to the original once `query_location` byte offsets are dropped, with
+identical collected relation and function names, and the print is idempotent.
+
+**Two operator spellings were refused while the same operations were allowed as
+calls.** `SELECT name || ' x'` was rejected on `||` while `concat(name, ' x')`
+passed, and `^` was missing against `pow` / `power`, which are both listed. This
+is the cost of enumerating spellings by hand, and it is paid by the product:
+string concatenation is the most common idiom in a collections report. Both are
+now on the list. Neither adds capability — every operator-named function in
+DuckDB's catalog is `function_type = 'scalar'` (28 names on 1.5.3), so none can
+read a file or reach the catalog. The remaining 24 stay off the list because no
+receivables query needs a bit shift, and refusal is the cheap direction.
+
+Measured by mutation on the resulting suite (291 tests): removing `||` and `^`
+turns **6** red; wrapping the caller's text again turns **10** red; restoring
+the peeling loop turns **1** red; adding the rest of the operator family — the
+mutation that *relaxes* rather than removes — turns **1** red. Two results
+recorded because they are the honest ones: dropping the fixed-point comparison
+turns only **1** red, and that test has to fake a lying printer to get there,
+because DuckDB 1.5.3 round-trips every real payload exactly; and the branch that
+rephrases a wrapper failure is unreachable by any payload once the wrapped text
+is generated, so its test fakes a broken normalizer too. Both are insurance
+against a future release or refactor, and neither can be proved by a query.
+
+**Not fixed here, and named rather than left quiet.** An error raised while
+*executing* the guarded query still reaches the model with the wrapper's line
+numbering, through `tools.py` and `mcp_server/server.py`:
+
+```
+Binder Error: Referenced column "missing" not found in FROM clause!
+LINE 2: SELECT count_star() FROM customers GROUP BY missing
+```
+
+Same class, different layer, and its severity is product quality rather than
+confidentiality — this repo is public, so the wrapper's shape is not a secret
+from anyone; the cost is that a model trying to self-correct is handed a line
+number into a query it did not compose.
+
 **Consequences.**
 
 - **Positive.** The whole class of scanner/executor disagreement is gone. The

@@ -37,9 +37,31 @@ Design rules (do not relax these to "make a query pass" — fix the query):
   exempts a function: DuckDB resolves ``name(`` to a function no matter what a
   CTE is called, so allowing that would let ``WITH duckdb_settings AS (…)``
   whitelist ``duckdb_settings()``;
+* what gets executed is **printed by the parser from the validated tree**, not
+  copied from the caller's text (see below);
 * the result is wrapped in an outer ``LIMIT`` so the model can never dump the
   whole ledger — and the wrapped text is re-parsed to prove it is still one
   statement.
+
+Why the executed text is regenerated, not the caller's
+------------------------------------------------------
+The guard validates a *tree* and used to execute a *string* — the caller's
+string, pasted into ``SELECT * FROM (…) LIMIT n``. Those are two different
+artefacts, and everything between them was handled by hand: a loop that peeled
+trailing separators off the text so the wrapper would still parse. It peeled
+only what was literally last, so ``SELECT count(*) FROM invoices; -- total``
+reached the wrapper with a semicolon inside the parentheses and died there, on
+a DuckDB syntax error that quoted the wrapper's own second line back to the
+model. A trailing comment is something a language model writes constantly.
+
+So the text is no longer repaired: ``json_deserialize_sql`` asks DuckDB to
+print the statement back from the tree that just passed every check, and *that*
+is what gets wrapped. Comments, trailing separators and exotic quoting do not
+survive a print — they were never in the tree. The printed text is then parsed
+again and its tree compared with the validated one; a mismatch is refused
+rather than executed, so a printer bug in some future DuckDB release costs a
+query instead of becoming a difference between what was checked and what runs.
+The caller's text now reaches nothing but the parser.
 
 What each layer actually protects. ``read_only=True`` protects *integrity*; it
 stops writes. It does **not** protect *confidentiality*: a read that reaches
@@ -131,6 +153,17 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset(
         # comparison / boolean operators the parser reports as functions
         "and", "or", "not", "=", "!=", "<>", "<", "<=", ">", ">=", "+", "-",
         "*", "/", "%", "~~", "!~~", "~~*", "!~~*",
+        # `||` is string concatenation — the single most common idiom in a
+        # collections report ("name || ' — ' || status") and it was
+        # refused while `concat()`, the same operation spelled as a call, was
+        # allowed. `^` is the operator spelling of `pow` / `power`, both of
+        # which are listed a few lines up. Neither adds capability: the whole
+        # operator-named family in DuckDB's catalog is `function_type =
+        # 'scalar'` (28 names, measured on 1.5.3), so none of them can read a
+        # file or reach the catalog. The rest of that family — bit shifts,
+        # array distance, JSON arrows — stays off the list because no
+        # receivables query needs it, and refusal is the cheap direction.
+        "||", "^",
         # list / struct helpers used by analytical SQL
         "to_days", "to_months", "to_years", "to_hours", "to_minutes",
         "to_seconds", "to_weeks", "to_milliseconds", "to_microseconds",
@@ -217,6 +250,63 @@ def _syntax_tree(sql: str) -> dict[str, Any]:
             f"({tree.get('error_type') or 'not a select statement'})."
         )
     return tree
+
+
+def _without_locations(node: Any) -> Any:
+    """Copy of `node` with every `query_location` dropped.
+
+    Those fields are byte offsets into the text the tree came from, so they
+    shift whenever the text is reprinted even though nothing about the
+    statement changed. They are the only field that differs across a print /
+    re-parse round trip (measured over the whole accepted corpus of both guard
+    suites: 27 of 27 trees identical once these are removed), which is why the
+    fixed-point check can afford to be an exact comparison of everything else.
+    """
+    if isinstance(node, dict):
+        return {
+            key: _without_locations(value)
+            for key, value in node.items()
+            if key != "query_location"
+        }
+    if isinstance(node, list):
+        return [_without_locations(value) for value in node]
+    return node
+
+
+def _canonical_statement(sql: str, tree: dict[str, Any]) -> str:
+    """Return the statement as DuckDB prints it back from `tree`.
+
+    The round trip is what removes comments and trailing separators: they are
+    lexical noise that never reached the tree, so they cannot come out of a
+    print. `sql` is re-serialized here rather than the already-parsed `tree`
+    being sent back, so that the printed text is derived by DuckDB from its own
+    serialization in one call — one extra parse per query, on a connection that
+    holds no data.
+
+    The result is parsed again and compared with the tree that passed the
+    allow-lists. That comparison is the entire safety argument for executing
+    generated text instead of the caller's: if DuckDB's printer and parser ever
+    disagree, the query is refused rather than run, so the statement that
+    executes is always the statement that was checked.
+    """
+    with _parser_lock:
+        try:
+            raw = (
+                _parser()
+                .execute("SELECT json_deserialize_sql(json_serialize_sql(?))", [sql])
+                .fetchone()
+            )
+        except duckdb.Error as exc:
+            raise GuardrailError(f"Query could not be normalized: {exc}") from exc
+    if not raw or not raw[0]:
+        raise GuardrailError("Query could not be normalized.")
+    canonical = str(raw[0])
+    if _without_locations(_syntax_tree(canonical)) != _without_locations(tree):
+        raise GuardrailError(
+            "Query could not be normalized: the parser did not reproduce the "
+            "statement that was validated."
+        )
+    return canonical
 
 
 def _collect(
@@ -356,7 +446,8 @@ def _collect(
 def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     """Validate `sql` and return an executable, row-capped query.
 
-    Returns the original statement wrapped in ``SELECT * FROM (...) LIMIT n``.
+    Returns the statement — as DuckDB prints it back from the validated syntax
+    tree, not as it was written — wrapped in ``SELECT * FROM (...) LIMIT n``.
     Raises ``GuardrailError`` (never silently rewrites) on any violation.
     """
     if not sql or not sql.strip():
@@ -364,14 +455,11 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     if max_rows <= 0:
         raise GuardrailError("max_rows must be positive.")
 
-    # Trailing separators are cosmetic: "SELECT 1; ; " is one statement with
-    # noise after it. Strip semicolons AND the whitespace between them, then let
-    # the parser rule on what is left.
+    # Trailing separators need no handling here: `extract_statements` reports
+    # "SELECT 1; ; " as one statement and a bare ";" as none, so both the
+    # cosmetic case and the empty case are decided by the parser. A ";" alone
+    # is refused by the count below rather than by a length check on text.
     stmt = sql.strip()
-    while stmt and stmt[-1] in ";  \t\r\n":
-        stmt = stmt[:-1].rstrip()
-    if not stmt:
-        raise GuardrailError("Empty query after stripping separators.")
 
     _single_statement(stmt)
     tree = _syntax_tree(stmt)
@@ -400,10 +488,26 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
             "Function(s) not in allow-list: " + ", ".join(unknown_fns) + "."
         )
 
-    guarded = f"SELECT * FROM (\n{stmt}\n) AS _guarded LIMIT {int(max_rows)}"
+    canonical = _canonical_statement(stmt, tree)
+
+    guarded = f"SELECT * FROM (\n{canonical}\n) AS _guarded LIMIT {int(max_rows)}"
     # The wrapper is the last thing an attacker can aim at: closing it early and
     # appending statements is how the old guard was escaped. Re-parsing the
     # finished text proves that what will actually be executed is still exactly
-    # one statement.
-    _single_statement(guarded)
+    # one statement. Nothing the caller wrote is pasted in here any more, so
+    # this check is a proof rather than a filter — and its failure message says
+    # so in the guard's own words instead of quoting the wrapper's text back.
+    # Not for secrecy: this file is public, so the wrapper's shape is not a
+    # secret from anyone. The reason is that the caller is a language model
+    # trying to self-correct, and a syntax error pointing at a line it did not
+    # write is feedback it cannot act on. Measured: no payload in either guard
+    # suite can reach the `except` branch, so it is insurance against a
+    # refactor rather than a live filter; the test that covers it has to fake a
+    # broken normalizer to get there.
+    try:
+        _single_statement(guarded)
+    except GuardrailError as exc:
+        raise GuardrailError(
+            "The validated query could not be wrapped as a single statement."
+        ) from exc
     return guarded

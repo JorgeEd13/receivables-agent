@@ -45,6 +45,7 @@ import contextlib
 import duckdb
 import pytest
 
+from src.agent import sql_guard
 from src.agent.ledger import connect_readonly
 from src.agent.sql_guard import GuardrailError, guard_query
 
@@ -1130,3 +1131,235 @@ def test_r4_unqualified_and_schema_qualified_names_still_pass(
 ) -> None:
     con.execute(f"SELECT * FROM (\n{sql}\n) AS _sanity LIMIT 1").fetchall()
     assert run_guarded(con, sql) is not None
+
+
+# =========================================================================== #
+# ROUND 5 — what the guard refused that it should not have, and what it said
+# while refusing.
+#
+# Like ROUND 4, this did not come from an attack. It came from the same blind
+# audit, which pointed at two queries a paying user writes and the guard threw
+# away, plus one thing the refusal message handed back to the model:
+#
+#   SELECT customer_name || ' x' FROM customers
+#     -->  REFUSED: Function(s) not in allow-list: ||.
+#   SELECT concat(customer_name, ' x') FROM customers
+#     -->  accepted
+#
+# The same operation, spelled two ways, decided differently — `concat` was on
+# the list and `||` was not. `^` was the same omission against `pow` / `power`.
+# That is the cost of enumerating spellings by hand, and it is paid by the
+# product, not by an attacker: string concatenation is the most common idiom in
+# a collections report.
+#
+#   SELECT count(*) FROM invoices; -- total
+#     -->  REFUSED: Query does not parse: Parser Error: syntax error at or
+#          near ";"
+#          LINE 2: SELECT count(*) FROM invoices; -- total
+#
+# The refusal came from the LAST check, on the guard's own wrapper — the strip
+# loop peeled only what was literally last, so the semicolon travelled into
+# `SELECT * FROM ( … )` and broke it there. Two defects in one message: a query
+# a model writes constantly was refused, and the refusal was a syntax error
+# about `LINE 2` of a text the caller never wrote.
+#
+# Stating the severity of that second one honestly, because the first framing
+# of it was wrong: this is NOT hiding the wrapper from an attacker. The repo is
+# public and the wrapper is written out in `sql_guard.py`'s docstring, so there
+# is nothing to hide. The cost is that the caller is a language model trying to
+# self-correct, and it was handed a line number into a query it did not compose
+# — feedback it can only act on by guessing.
+#
+# The repair replaced the text handling rather than patching it: the statement
+# that gets wrapped is now printed by DuckDB from the validated tree
+# (`json_deserialize_sql`), and the printed text is re-parsed and compared with
+# that tree before anything is wrapped. Comments and separators are lexical —
+# they never reach a tree, so they cannot come out of a print.
+#
+# Note what this block does NOT claim. Removing the fixed-point comparison
+# leaves the whole suite green, because DuckDB 1.5.3's printer round-trips
+# every payload here exactly. Only `test_r5_a_printer_that_lies_is_refused`
+# turns red, and it has to fake the divergence to do it. The check is insurance
+# against a future release, and insurance nobody has collected on cannot be
+# proved by a passing test.
+# =========================================================================== #
+
+R5_SPELLED_AS_AN_OPERATOR = [
+    ("SELECT name || ' x' AS z FROM customers", "concat_pipes"),
+    ("SELECT c.name || ' — ' || i.status AS label FROM customers c "
+     "JOIN v_invoices i ON c.customer_id = i.customer_id", "concat_chain"),
+    ("SELECT amount ^ 2 AS p FROM invoices", "power_caret"),
+]
+
+
+@pytest.mark.parametrize(
+    "sql,label", R5_SPELLED_AS_AN_OPERATOR, ids=[q[1] for q in R5_SPELLED_AS_AN_OPERATOR]
+)
+def test_r5_operator_spelling_is_not_refused(con, sql: str, label: str) -> None:
+    """Guarantee 4. Executed for real first, so the test cannot be satisfied by
+    a guard that accepts something DuckDB would reject anyway."""
+    con.execute(f"SELECT * FROM (\n{sql}\n) AS _sanity LIMIT 1").fetchall()
+    assert run_guarded(con, sql) is not None
+
+
+def test_r5_operator_and_call_spelling_agree() -> None:
+    """The defect was not "`||` is missing", it was that two spellings of one
+    operation were decided differently. Pinning the pair is what keeps a future
+    edit from re-opening it on the other side."""
+    assert guard_query("SELECT concat(name, ' x') AS z FROM customers")
+    assert guard_query("SELECT name || ' x' AS z FROM customers")
+    assert guard_query("SELECT pow(amount, 2) AS p FROM invoices")
+    assert guard_query("SELECT amount ^ 2 AS p FROM invoices")
+
+
+def test_r5_the_rest_of_the_operator_family_is_still_refused() -> None:
+    """Paired against the two above. The repair was to add two names, not to
+    stop checking operator-named functions — a guard that had exempted the
+    whole family would pass every test above and fail this one.
+
+    Asserting the *reason* matters here: a bit shift on a text column is a type
+    error in DuckDB too, so "it raised" would go green with the allow-list
+    switched off entirely.
+    """
+    for sql, name in [
+        ("SELECT amount << 2 AS z FROM invoices", "<<"),
+        ("SELECT amount | 2 AS z FROM invoices", "|"),
+        ("SELECT amount & 2 AS z FROM invoices", "&"),
+    ]:
+        with pytest.raises(GuardrailError) as exc:
+            guard_query(sql)
+        assert "allow-list" in str(exc.value), str(exc.value)
+        assert name in str(exc.value), str(exc.value)
+
+
+R5_TRAILING_NOISE = [
+    ("SELECT count(*) AS n FROM invoices; -- total", "semicolon_then_line_comment"),
+    ("SELECT count(*) AS n FROM invoices; /* total */", "semicolon_then_block_comment"),
+    ("SELECT count(*) AS n FROM invoices;\n-- total\n", "semicolon_then_comment_line"),
+    ("-- how many\nSELECT count(*) AS n FROM invoices;", "leading_comment_and_semicolon"),
+]
+
+
+@pytest.mark.parametrize(
+    "sql,label", R5_TRAILING_NOISE, ids=[q[1] for q in R5_TRAILING_NOISE]
+)
+def test_r5_a_comment_after_the_semicolon_is_not_a_second_statement(
+    con, sql: str, label: str
+) -> None:
+    guarded = guard_query(sql)
+    # Executed for real: a guard that accepted the query but produced text
+    # DuckDB will not run has fixed nothing.
+    assert con.execute(guarded).fetchall() is not None
+    # The comment is gone from what will execute — it was never in the tree.
+    # Checking the output, not just the absence of an exception: a guard that
+    # accepted the query and carried the comment into the wrapper would be one
+    # DuckDB release away from breaking again.
+    assert "--" not in guarded and "/*" not in guarded, guarded
+
+
+def test_r5_stacking_behind_a_comment_is_still_two_statements() -> None:
+    """The discriminator for the case above. Tolerating a trailing comment must
+    not tolerate a real second statement hidden behind one — the two payloads
+    differ only in what follows the comment."""
+    with pytest.raises(GuardrailError, match=r"(?i)single statement"):
+        guard_query("SELECT 1 AS a; -- note\n; SELECT 2 AS b")
+    with pytest.raises(GuardrailError, match=r"(?i)single statement"):
+        guard_query("SELECT 1 AS a; /* note */ DROP TABLE customers")
+
+
+def test_r5_a_refusal_never_quotes_the_wrapper_back() -> None:
+    """The message contract, separately from the false positive.
+
+    A refusal from the guard has to be phrased in the guard's own vocabulary —
+    a policy reason the caller can act on — not as a DuckDB syntax error about
+    a line of the wrapper. Refusals that quote the *caller's* own text are fine
+    and still happen: the model already has that text and can fix it.
+
+    NOTE the limit of this test: it covers the guard's refusals only. An error
+    raised while *executing* the guarded query still reaches the model with the
+    wrapper's line numbering, through `tools.py` and `mcp_server/server.py`.
+    That path is not this module's and is tracked separately.
+    """
+    refusals = [
+        "SELECT 1) AS x; DROP TABLE customers; SELECT * FROM (SELECT 1",
+        "SELECT * FROM secret_table",
+        "SELECT * FROM read_csv('/etc/passwd')",
+        "SELECT * FROM evildb.main.customers",
+        "SHOW ALL TABLES",
+    ]
+    for sql in refusals:
+        with pytest.raises(GuardrailError) as exc:
+            guard_query(sql)
+        message = str(exc.value)
+        assert "_guarded" not in message, message
+        assert "LIMIT 200" not in message, message
+        assert "LINE 2" not in message, message
+
+
+def test_r5_a_failing_wrapper_still_does_not_quote_itself(monkeypatch) -> None:
+    """Pins the message contract for a branch nothing can reach today.
+
+    Measured: deleting the hand-off that produces this message leaves all 290
+    tests green, because once the wrapped text is printed from a validated tree
+    there is no payload that can make the final check fail. That makes the
+    branch insurance against a future refactor putting caller text back in the
+    wrapper — and insurance nobody can trigger is indistinguishable from dead
+    code, so the trigger is faked here: a normalizer that returns an unbalanced
+    statement. The assertion is not that it is refused, it is *how*.
+    """
+    monkeypatch.setattr(
+        sql_guard, "_canonical_statement", lambda sql, tree: "SELECT 1) AS x"
+    )
+    with pytest.raises(GuardrailError) as exc:
+        guard_query("SELECT * FROM customers")
+    message = str(exc.value)
+    assert "_guarded" not in message, message
+    assert "LINE" not in message, message
+    assert "wrapped as a single statement" in message, message
+
+
+def test_r5_the_executed_statement_is_printed_from_the_validated_tree() -> None:
+    """What the wrapper contains is no longer the caller's text.
+
+    `count(*)` comes back as `count_star()` because that is the name the tree
+    carries — which is also the name the allow-list checks. The assertion is
+    that the two agree: whatever executes is what was validated.
+    """
+    guarded = guard_query("SELECT count(*) FROM invoices; -- total")
+    assert "count_star()" in guarded, guarded
+    assert "count(*)" not in guarded, guarded
+
+
+def test_r5_a_printer_that_lies_is_refused(monkeypatch) -> None:
+    """The fixed-point check, proved by faking the failure it exists for.
+
+    Executing generated text is only safe while DuckDB's printer and parser
+    agree. If a release ever prints something that parses differently, the
+    statement that runs stops being the statement that was checked — so the
+    printed text is parsed again and compared, and a mismatch is refused. This
+    substitutes a printer that swaps the relation for one off the allow-list.
+    """
+    real_parser = sql_guard._parser
+
+    class LyingConnection:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=None):
+            result = self._inner.execute(sql, params)
+            if "json_deserialize_sql" in sql:
+                return _Fetchone("SELECT * FROM internal_notes")
+            return result
+
+    class _Fetchone:
+        def __init__(self, value):
+            self._value = value
+
+        def fetchone(self):
+            return (self._value,)
+
+    monkeypatch.setattr(
+        sql_guard, "_parser", lambda: LyingConnection(real_parser())
+    )
+    with pytest.raises(GuardrailError, match=r"(?i)normali[sz]ed"):
+        guard_query("SELECT * FROM customers")

@@ -107,6 +107,17 @@ ALLOWED = [
     ("SELECT 1; ; ", "trailing empty statements"),
     # a benign comment is stripped, query still valid
     ("SELECT 1 -- DROP TABLE customers\n", "deny word in trailing comment"),
+    # a semicolon FOLLOWED by a comment — the combination a model writes and
+    # the guard used to refuse, because the separator travelled into the
+    # wrapper. Comments never reach the syntax tree, so they cannot come back
+    # out of it (ADR-022).
+    ("SELECT count(*) FROM invoices; -- total", "semicolon then comment"),
+    ("SELECT count(*) FROM invoices; /* total */", "semicolon then block comment"),
+    # operator spellings of allow-listed functions: `||` is `concat`, `^` is
+    # `pow`. Refusing one spelling while allowing the other cost the product a
+    # query and bought no safety.
+    ("SELECT name || ' x' FROM customers", "concat as operator"),
+    ("SELECT amount ^ 2 FROM invoices", "power as operator"),
 ]
 
 
@@ -134,6 +145,15 @@ def test_cte_name_is_not_treated_as_unknown_relation() -> None:
         "SELECT count(*) FROM recent"
     )
     assert "LIMIT" in guard_query(sql)
+
+
+def test_separators_alone_are_not_a_statement() -> None:
+    """A string of separators used to be refused by a length check on text that
+    had been peeled by hand. The parser decides it now — `extract_statements`
+    reports zero statements — so the message names the real reason."""
+    for sql in [";", " ; ; ", ";\n;"]:
+        with pytest.raises(GuardrailError, match=r"(?i)single statement"):
+            guard_query(sql)
 
 
 def test_error_message_names_the_violation() -> None:
