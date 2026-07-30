@@ -47,7 +47,15 @@ import pytest
 
 from src.agent import sql_guard
 from src.agent.ledger import connect_readonly
-from src.agent.sql_guard import GuardrailError, guard_query
+from src.agent.sql_guard import (
+    ALLOWED_FUNCTIONS,
+    ALLOWED_RELATIONS,
+    DEFAULT_MAX_ROWS,
+    MAX_ROWS_CEILING,
+    MAX_WALK_DEPTH,
+    GuardrailError,
+    guard_query,
+)
 
 # A row value that exists in the throwaway ledger but in a relation that is NOT
 # on the allow-list. If this string ever comes back from a guarded query, the
@@ -1363,3 +1371,395 @@ def test_r5_a_printer_that_lies_is_refused(monkeypatch) -> None:
     )
     with pytest.raises(GuardrailError, match=r"(?i)normali[sz]ed"):
         guard_query("SELECT * FROM customers")
+
+
+# =========================================================================== #
+# ROUND 6 — what the suite did not pin.
+#
+# Third block from the same blind audit that produced ROUND 4 and ROUND 5, and
+# the only one of the three that found no bypass. It found the opposite: places
+# where the tests above go green whether the guard is right or wrong. Three
+# families, each measured before it was written.
+#
+# (a) THE ALLOW-LISTS WERE TESTED AS A MECHANISM, NEVER AS A POLICY. Every test
+#     above proves that *something not on the list* is refused. Nothing proved
+#     that the list holds the right names. Measured against the 291-test suite
+#     as it stood before this block:
+#
+#       + read_text, read_blob, sniff_csv to ALLOWED_FUNCTIONS  -> 291 green,
+#         and `SELECT * FROM read_text('/etc/passwd')` comes back guarded
+#       - payments, communications from ALLOWED_RELATIONS       -> 291 green,
+#         and `SELECT * FROM payments` comes back refused
+#       + information_schema, pg_catalog to ALLOWED_SCHEMAS     -> 291 green
+#
+#     Three of the nine allow-listed relations appeared in no payload at all.
+#     This is the mutation that a real pull request looks like — it *relaxes*
+#     the policy instead of deleting a check — and it is the one an enumerated
+#     test cannot see. What follows compares the lists against a full surface
+#     (DuckDB's function catalog, the ledger's own catalog) instead of against
+#     more examples.
+#
+# (b) THE FUNCTION PROMISED `GuardrailError` "ON ANY VIOLATION" AND FIVE INPUTS
+#     ESCAPED IT. `guard_query(123)` raised AttributeError, `max_rows="5"`
+#     TypeError, `max_rows=float("inf")` OverflowError — none of which the two
+#     callers catch. Two more did not raise at all: `max_rows=2.9` truncated to
+#     `LIMIT 2` in silence, and `max_rows=10**30` produced a LIMIT with thirty
+#     zeroes, which is no row cap. And a 996-character query of the form
+#     `SELECT 1+1+1+…` hit Python's stack limit inside the tree walk and left as
+#     a RecursionError.
+#
+# (c) NOTHING ASSERTED, AS A CONTRACT, THAT THE WRAPPER CONTAINS THE VALIDATED
+#     STATEMENT. A `guard_query` that threw its input away and returned
+#     `SELECT * FROM (SELECT 1) AS _guarded LIMIT n` passed every one of the 18
+#     `test_allowed` cases — they check the shape of the string, not what is
+#     inside it. Stating the rest of that measurement, because it is the part
+#     that weakens the finding: 12 other tests did turn red, and all 12 are
+#     end-to-end ones that execute the guarded text and look at the rows. So the
+#     property was held by the tests that happen to run queries, not by anything
+#     that says it. ROUND 5 pinned one instance of it (`count(*)` must come back
+#     as `count_star()`); the general form is below.
+#
+# MEASURED AFTER THIS BLOCK (319 tests). Twelve mutations of the guard, all red:
+# poisoning the function list 1 · removing two relations 2 · adding
+# `internal_notes` 35 · opening ALLOWED_SCHEMAS 3 · deleting the `sql` type check
+# 3 · deleting the `max_rows` type check 3 · deleting the ceiling 2 · drifting
+# the ceiling from the settings bound 1 · deleting the depth guard 1 · setting
+# the depth limit to 4 (the over-restrictive direction) 101 · the `SELECT 1`
+# stand-in 19 · re-opening the ROUND 4 catalog hole 9.
+#
+# And the number that is not flattering: of seven mutations applied to these
+# tests instead of to the guard, six stay green. Deleting the reason assertions,
+# emptying the loops, comparing a tree to `is not None` — the suite cannot see
+# any of it. Only the one that broke the catalog probe went red, and only
+# because that probe has a sanity assertion of its own. A test file is not
+# covered by anything; what holds it is that the mutations above were run.
+# =========================================================================== #
+
+# --------------------------------------------------------------------------- #
+# 6a. The allow-lists, checked against a surface instead of against examples.
+# --------------------------------------------------------------------------- #
+
+# The only table functions on the allow-list, and why each is there: all five
+# generate rows from their arguments. None of them opens anything — that is the
+# property the test below is really about, and it is stated here by name because
+# DuckDB's catalog has no column for "reads a file".
+GENERATOR_TABLE_FUNCTIONS = frozenset(
+    {"unnest", "range", "generate_series", "repeat", "histogram"}
+)
+
+
+def test_r6_no_reading_table_function_is_on_the_function_allow_list() -> None:
+    """The allow-list must not contain a table function that opens a resource.
+
+    Every exfiltration payload in this file is a table function: `read_csv`,
+    `read_text`, `read_parquet`, `glob`, `duckdb_settings`. So instead of adding
+    three more names to a REJECTED list — which is how the list stayed
+    untestable in the first place — this asks DuckDB for *every* table function
+    it knows and intersects that with the allow-list. A future release that adds
+    a new file reader is covered on the day it ships, and so is a pull request
+    that adds one to the list by hand.
+
+    Honest boundary: this catches table functions. A *scalar* function that
+    reached outside the database would pass it. DuckDB's scalar surface holds
+    two that come close — `getvariable` and `current_setting` — and neither is
+    on the allow-list, but that is checked by reading, not by this test.
+    """
+    catalog = duckdb.connect(":memory:")
+    try:
+        rows = catalog.execute(
+            "SELECT DISTINCT lower(function_name), function_type FROM duckdb_functions()"
+        ).fetchall()
+    finally:
+        catalog.close()
+
+    table_functions = {name for name, ftype in rows if ftype in ("table", "table_macro")}
+    # Sanity on the probe itself: an empty or mistyped catalog query would make
+    # the assertion below vacuous.
+    assert "read_text" in table_functions and "glob" in table_functions
+
+    leaked = sorted((ALLOWED_FUNCTIONS & table_functions) - GENERATOR_TABLE_FUNCTIONS)
+    assert not leaked, f"table function(s) on the allow-list: {leaked}"
+
+
+# The relations this suite's ledger contains that policy keeps off-limits. It is
+# written out here, in the test, so that the *partition* of the ledger — what may
+# be read and what may not — is stated somewhere other than in the list under
+# test. See `test_r6_the_ledger_surface_is_partitioned_by_policy`.
+LEDGER_OFF_LIMITS = frozenset({"internal_notes"})
+
+
+def _ledger_relations(con) -> set[str]:
+    """Every non-internal table and view in the throwaway ledger."""
+    return {
+        row[0].lower()
+        for row in con.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE NOT internal "
+            "UNION ALL "
+            "SELECT view_name FROM duckdb_views() WHERE NOT internal"
+        ).fetchall()
+    }
+
+
+def test_r6_the_ledger_surface_is_partitioned_by_policy(con) -> None:
+    """Every relation the ledger holds is decided — allowed or refused.
+
+    The first version of this test was parametrized over `ALLOWED_RELATIONS` and
+    asserted each name reads. That is the same defect one level up: removing
+    `payments` from the list removed the test case along with it, and the mutation
+    stayed green (measured: 0 red). A list cannot pin itself. So the surface here
+    is the ledger's own catalog, and the allow-list is checked *against* it.
+
+    Honest boundary: the surface is this suite's throwaway ledger, not
+    `data/generate.py`. `_build_ledger` promising to mirror the real schema is
+    what carries that half, and it is a promise in a docstring, not a check.
+    """
+    present = _ledger_relations(con)
+    assert not (ALLOWED_RELATIONS & LEDGER_OFF_LIMITS), "a relation is on both sides"
+    # Nothing in the ledger is undecided, and nothing on the allow-list is absent
+    # from the ledger. Removing a name from ALLOWED_RELATIONS fails here because
+    # the ledger still has it and no policy line excludes it.
+    assert present == ALLOWED_RELATIONS | LEDGER_OFF_LIMITS
+
+
+def test_r6_every_relation_the_policy_allows_is_actually_readable(con) -> None:
+    """The allow-list is a promise in both directions.
+
+    `payments`, `communications` and `meta` were on the list and appeared in no
+    payload in either suite, so the agent could have lost three relations without
+    a test noticing. Each is now exercised end-to-end — guarded, then executed —
+    against the ledger's own catalog rather than against the list, so this stays
+    honest if the list shrinks.
+    """
+    for relation in sorted(_ledger_relations(con) - LEDGER_OFF_LIMITS):
+        assert run_guarded(con, f"SELECT * FROM {relation}") is not None
+
+
+def test_r6_every_relation_the_policy_forbids_is_refused(con) -> None:
+    """The other direction, off the same catalog.
+
+    Enumerating forbidden names in the test is what let the list drift: the suite
+    only ever knew about `internal_notes`. A table added to the schema is refused
+    by default here, and adding one to ALLOWED_RELATIONS turns this red.
+    """
+    for name in sorted(_ledger_relations(con) - ALLOWED_RELATIONS):
+        with pytest.raises(GuardrailError) as exc:
+            guard_query(f"SELECT * FROM {name}")
+        assert name in str(exc.value), str(exc.value)
+
+
+# The bare name in each of these IS allow-listed, so the relation list cannot be
+# what refuses them — only the schema check can. That is what makes them
+# discriminating: the pre-existing "schema" tests all used names like
+# `information_schema.tables`, which are refused on `tables` alone and stay green
+# with ALLOWED_SCHEMAS wide open.
+R6_CATALOG_SCHEMA_WITH_ALLOWED_TABLE = [
+    ("SELECT * FROM information_schema.customers", "information_schema.customers"),
+    ("SELECT * FROM pg_catalog.invoices", "pg_catalog.invoices"),
+    ("SELECT * FROM system.v_dso", "system.v_dso"),
+]
+
+
+@pytest.mark.parametrize(
+    "sql,path",
+    R6_CATALOG_SCHEMA_WITH_ALLOWED_TABLE,
+    ids=[q[1] for q in R6_CATALOG_SCHEMA_WITH_ALLOWED_TABLE],
+)
+def test_r6_a_foreign_schema_is_refused_even_with_an_allow_listed_table_name(
+    sql: str, path: str
+) -> None:
+    with pytest.raises(GuardrailError) as exc:
+        guard_query(sql)
+    # The refusal names the qualified path, not the bare name: a guard that said
+    # "customers" here would be refusing the wrong thing, and a guard that let
+    # the schema through would not be refusing at all.
+    assert path in str(exc.value), str(exc.value)
+    assert "allow-list" in str(exc.value), str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# 6b. The argument contract: refusals, not crashes; a cap that caps.
+# --------------------------------------------------------------------------- #
+
+R6_BAD_ARGUMENTS = [
+    ((123,), {}, "must be a string", "sql_is_an_int"),
+    ((None,), {}, "must be a string", "sql_is_none"),
+    ((["SELECT 1"],), {}, "must be a string", "sql_is_a_list"),
+    (("SELECT 1",), {"max_rows": "5"}, "max_rows", "max_rows_is_a_string"),
+    (("SELECT 1",), {"max_rows": 2.9}, "max_rows", "max_rows_is_a_float"),
+    (("SELECT 1",), {"max_rows": float("inf")}, "max_rows", "max_rows_is_infinity"),
+    (("SELECT 1",), {"max_rows": True}, "max_rows", "max_rows_is_a_bool"),
+    (("SELECT 1",), {"max_rows": 10**30}, "max_rows", "max_rows_is_astronomical"),
+    (("SELECT 1",), {"max_rows": MAX_ROWS_CEILING + 1}, "max_rows", "max_rows_over_cap"),
+]
+
+
+@pytest.mark.parametrize(
+    "args,kwargs,offender,label", R6_BAD_ARGUMENTS, ids=[a[3] for a in R6_BAD_ARGUMENTS]
+)
+def test_r6_a_bad_argument_is_a_refusal_not_a_crash(
+    args: tuple, kwargs: dict, offender: str, label: str
+) -> None:
+    """`tools.py` and `mcp_server/server.py` catch `GuardrailError` and
+    `duckdb.Error`. Anything else leaves the tool as a traceback instead of a
+    message the model can act on, and two of these did not raise at all.
+
+    Asserting the *reason*, not just the exception: the SQL in the `max_rows`
+    cases is valid and allow-listed, so a `GuardrailError` naming anything other
+    than `max_rows` would mean the payload was refused for an unrelated reason
+    and the test proves nothing.
+    """
+    with pytest.raises(GuardrailError) as exc:
+        guard_query(*args, **kwargs)
+    assert offender in str(exc.value), str(exc.value)
+
+
+def test_r6_the_row_cap_is_bounded_on_both_sides() -> None:
+    """Paired with the block above so a lazy repair cannot pass it: refusing
+    *every* max_rows would satisfy the table and break the product."""
+    assert guard_query("SELECT 1", max_rows=1).endswith("LIMIT 1")
+    assert guard_query("SELECT 1", max_rows=MAX_ROWS_CEILING).endswith(
+        f"LIMIT {MAX_ROWS_CEILING}"
+    )
+    assert guard_query("SELECT 1").endswith(f"LIMIT {DEFAULT_MAX_ROWS}")
+
+
+def test_r6_the_guard_ceiling_and_the_settings_bound_agree() -> None:
+    """`Settings.max_rows` carries `le=10_000` and its comment says "the guard
+    enforces it". That was false until the ceiling existed: the bound applied to
+    the environment variable, while `plan_replay`, the MCP server and every test
+    passed their own number straight into `guard_query`.
+
+    `sql_guard` cannot import the settings — it is the security surface and
+    depends on nothing in the app — so the number is written twice. This is what
+    keeps the two copies equal; a comment would not.
+    """
+    from annotated_types import Le
+
+    from src.core.config import Settings
+
+    bounds = [m.le for m in Settings.model_fields["max_rows"].metadata if isinstance(m, Le)]
+    assert bounds == [MAX_ROWS_CEILING], bounds
+
+
+def test_r6_a_deeply_nested_query_is_refused_rather_than_crashing() -> None:
+    """`SELECT 1+1+1+…` is one flat-looking line and a very deep tree.
+
+    Measured before the fix: 494 terms (996 characters) raised `RecursionError`
+    out of `guard_query`. DuckDB's own parser refuses at depth 1000, so the band
+    in between was a Python crash rather than a decision — and where exactly it
+    fell depended on how deep the *caller's* stack already was, which made it a
+    different number under pytest than under the API.
+
+    The message assertion is the discriminator: at some length DuckDB refuses
+    the query on its own ("Max expression depth"), and a test that only checked
+    for `GuardrailError` would go green with this guard's own limit deleted.
+    """
+    with pytest.raises(GuardrailError) as exc:
+        guard_query("SELECT 1" + "+1" * 600)
+    assert "nested too deeply" in str(exc.value), str(exc.value)
+
+
+def test_r6_ordinary_nesting_is_not_refused(con) -> None:
+    """Paired with the depth cap: a limit of 1 would satisfy the test above.
+
+    This is a five-CTE aging report with a CASE ladder and a window function —
+    deliberately worse than anything else in either suite. It reaches walk depth
+    18 against a limit of 250, which is the headroom the limit was chosen for.
+    """
+    sql = """
+        WITH base AS (
+          SELECT c.customer_id, c.name, i.amount, i.status, i.due_date
+          FROM customers c JOIN v_invoices i ON c.customer_id = i.customer_id
+          WHERE i.status <> 'paid' AND i.amount > 0
+        ),
+        bucketed AS (
+          SELECT customer_id, name, amount,
+                 CASE WHEN date_diff('day', due_date, CURRENT_DATE) > 90 THEN '90+'
+                      WHEN date_diff('day', due_date, CURRENT_DATE) > 60 THEN '61-90'
+                      WHEN date_diff('day', due_date, CURRENT_DATE) > 30 THEN '31-60'
+                      ELSE '0-30' END AS bucket
+          FROM base
+        ),
+        ranked AS (
+          SELECT customer_id, name, bucket, sum(amount) AS total,
+                 row_number() OVER (PARTITION BY bucket ORDER BY sum(amount) DESC) AS rn
+          FROM bucketed GROUP BY customer_id, name, bucket
+        )
+        SELECT name || ' — ' || bucket AS label, round(total, 2) AS total
+        FROM ranked WHERE rn <= 5 ORDER BY bucket, total DESC
+    """
+    assert run_guarded(con, sql) is not None
+    assert MAX_WALK_DEPTH >= 250
+
+
+# --------------------------------------------------------------------------- #
+# 6c. What is inside the wrapper is the statement that was validated.
+# --------------------------------------------------------------------------- #
+
+R6_FIDELITY = [
+    ("SELECT * FROM customers", "bare_select"),
+    ("SELECT count(*) AS n FROM invoices; -- total", "comment_and_semicolon"),
+    ("SELECT name || ' x' AS z FROM customers", "operator_spelling"),
+    ("SELECT * FROM main.invoices", "schema_qualified"),
+    (
+        "WITH overdue AS (SELECT customer_id, amount FROM v_invoices "
+        "WHERE status = 'overdue') "
+        "SELECT customer_id, sum(amount) AS total FROM overdue GROUP BY customer_id",
+        "cte_aggregation",
+    ),
+    (
+        "SELECT c.name, i.amount FROM customers c "
+        "JOIN v_invoices i ON c.customer_id = i.customer_id ORDER BY i.amount DESC",
+        "join_with_order",
+    ),
+    ("SELECT extract(year FROM issue_date) AS y FROM invoices", "extract_idiom"),
+]
+
+
+def _unwrap(guarded: str) -> str:
+    """Return the statement the guard put inside its own wrapper."""
+    prefix, suffix = "SELECT * FROM (\n", "\n) AS _guarded LIMIT "
+    assert guarded.startswith(prefix), guarded
+    inner, marker, limit = guarded[len(prefix) :].rpartition(suffix)
+    assert marker == suffix, guarded
+    assert limit.isdigit(), guarded
+    return inner
+
+
+@pytest.mark.parametrize("sql,label", R6_FIDELITY, ids=[q[1] for q in R6_FIDELITY])
+def test_r6_the_wrapper_contains_the_statement_that_was_validated(
+    sql: str, label: str
+) -> None:
+    """The general form of the ROUND 5 `count_star()` assertion.
+
+    The guard now executes text it generated itself, so "it returned something
+    that parses and is capped" is not enough: a `guard_query` that threw the
+    input away and returned `SELECT * FROM (SELECT 1) AS _guarded LIMIT 200`
+    satisfied every other accepted-query test in both suites. What is asserted
+    here is equality of *trees* — the wrapped statement parses to the same tree
+    the allow-lists were run against, once the byte offsets that any reprint
+    shifts are dropped.
+
+    Comparing trees rather than text is deliberate: the text legitimately
+    changes (`count(*)` prints as `count_star()`, comments disappear), and
+    asserting on text would make this a test of DuckDB's printer.
+    """
+    guarded = guard_query(sql)
+    validated = sql_guard._without_locations(sql_guard._syntax_tree(sql.strip()))
+    executed = sql_guard._without_locations(sql_guard._syntax_tree(_unwrap(guarded)))
+    assert executed == validated
+
+
+def test_r6_a_guard_that_ignored_its_input_would_fail_the_fidelity_test() -> None:
+    """The fidelity test's own discriminator.
+
+    It asserts equality against a tree it computes from the input, so it is only
+    meaningful if a wrapper carrying *different* SQL is unequal. Cheap to state,
+    and it is the assertion the whole block above rests on.
+    """
+    stand_in = f"SELECT * FROM (\nSELECT 1\n) AS _guarded LIMIT {DEFAULT_MAX_ROWS}"
+    validated = sql_guard._without_locations(
+        sql_guard._syntax_tree("SELECT * FROM customers")
+    )
+    executed = sql_guard._without_locations(sql_guard._syntax_tree(_unwrap(stand_in)))
+    assert executed != validated

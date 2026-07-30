@@ -186,6 +186,39 @@ ALLOWED_SCHEMAS: frozenset[str] = frozenset({"main", "memory", "temp"})
 
 DEFAULT_MAX_ROWS = 200
 
+# Upper bound on the row cap a caller may ask for. `Settings.max_rows` already
+# carries `le=10_000`, but that only bounds the *environment variable*: every
+# other caller of `guard_query` — `plan_replay`, the MCP server, a test — passes
+# the number straight through, and the guard used to format whatever arrived
+# into the LIMIT. `max_rows=10**30` produced `LIMIT 1000…000`, i.e. no cap at
+# all, which is exactly what the outer LIMIT exists to prevent.
+#
+# The number is duplicated in `core/config.py` on purpose: this module is the
+# security surface and imports nothing from the app, so it cannot read the
+# settings. The duplication is held by a test that compares the two bounds
+# rather than by a comment asking the next person to remember.
+MAX_ROWS_CEILING = 10_000
+
+# How deep `_collect` may recurse before refusing the query. The walk descends
+# one frame per dict and one per list, so a tree level costs about two frames.
+#
+# Without this, a deeply nested expression did not get refused — it *crashed*.
+# `SELECT 1+1+1+…` with 494 terms (996 characters, well inside anything a model
+# emits) raised `RecursionError` out of `guard_query`, past callers that catch
+# `GuardrailError` and `duckdb.Error` and nothing else. DuckDB's own parser has
+# a depth limit of its own ("Max expression depth"), but it only trips at 1000,
+# so the whole 494–999 band was a Python crash instead of a decision. 494 is
+# also not a fixed number: it is whatever is left of the interpreter's stack
+# when `guard_query` is called, so the same query crashed at different lengths
+# depending on how deep the caller already was.
+#
+# 250 frames against a measured worst case of **18** across every payload the
+# two guard suites accept, plus a five-CTE aging report with window functions
+# and a CASE ladder written to be worse than anything in them (also 18 — tree
+# depth follows nesting, not size). Thirteen times the deepest real query, and
+# still ~750 frames below the interpreter's default limit of 1000.
+MAX_WALK_DEPTH = 250
+
 # Parsing needs a connection, but never a *data* connection: this one is
 # in-memory, empty, and hardened the same way the ledger is. It only ever sees
 # `json_serialize_sql`, which parses text and returns a tree — it does not plan,
@@ -315,6 +348,7 @@ def _collect(
     functions: set[str],
     pseudo: set[str],
     scope: frozenset[str] = frozenset(),
+    depth: int = 0,
 ) -> None:
     """Walk the tree, resolving every table and function name *in its own scope*.
 
@@ -347,7 +381,17 @@ def _collect(
     accepted. Reading two thirds of a name is the same class of bug as keying
     the check on the node type — the field is there and the check did not look
     at it.
+
+    **The walk is bounded.** Recursion depth is a property of the *input*, and
+    the input is attacker-controlled text, so the natural stopping point is the
+    interpreter's stack limit — a `RecursionError` that no caller catches. The
+    limit is stated here instead, and a query that exceeds it is refused with a
+    reason like any other violation.
     """
+    if depth > MAX_WALK_DEPTH:
+        raise GuardrailError(
+            f"Query is nested too deeply (walk limit {MAX_WALK_DEPTH})."
+        )
     if isinstance(node, dict):
         # CTEs declared here are in scope for this subtree only — and NOT inside
         # their own definitions. Walking the definitions with the full set in
@@ -382,7 +426,9 @@ def _collect(
             visible = set(scope)
             for cte_name, entry in declared_here:
                 # Validated against the CTEs declared before it — not itself.
-                _collect(entry, tables, functions, pseudo, frozenset(visible))
+                _collect(
+                    entry, tables, functions, pseudo, frozenset(visible), depth + 1
+                )
                 visible.add(cte_name)
             scope = frozenset(visible)
 
@@ -437,10 +483,10 @@ def _collect(
             # every CTE name back in view inside its own body and undo that.
             if key == "cte_map" and declared_here:
                 continue
-            _collect(value, tables, functions, pseudo, scope)
+            _collect(value, tables, functions, pseudo, scope, depth + 1)
     elif isinstance(node, list):
         for value in node:
-            _collect(value, tables, functions, pseudo, scope)
+            _collect(value, tables, functions, pseudo, scope, depth + 1)
 
 
 def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
@@ -449,11 +495,33 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     Returns the statement — as DuckDB prints it back from the validated syntax
     tree, not as it was written — wrapped in ``SELECT * FROM (...) LIMIT n``.
     Raises ``GuardrailError`` (never silently rewrites) on any violation.
+
+    "Any violation" includes the arguments themselves. Both callers of this
+    function — ``tools.py`` and ``mcp_server/server.py`` — catch
+    ``GuardrailError`` and ``duckdb.Error``, so anything else escapes the tool
+    boundary as a crash instead of a refusal the model can act on. The type
+    checks below are what makes that catch complete; they were added after an
+    audit walked in through ``guard_query(123)`` (``AttributeError``),
+    ``max_rows="5"`` (``TypeError``) and ``max_rows=float("inf")``
+    (``OverflowError``).
     """
-    if not sql or not sql.strip():
+    if not isinstance(sql, str):
+        raise GuardrailError(f"Query must be a string (got {type(sql).__name__}).")
+    if not sql.strip():
         raise GuardrailError("Empty query.")
+    # `bool` is a subclass of `int`, and it is checked first because it is the
+    # one that fails *quietly*: `max_rows=True` formatted as `LIMIT 1` and
+    # returned a single row from a query the caller thought was uncapped.
+    if isinstance(max_rows, bool) or not isinstance(max_rows, int):
+        raise GuardrailError(
+            f"max_rows must be an int (got {type(max_rows).__name__})."
+        )
     if max_rows <= 0:
         raise GuardrailError("max_rows must be positive.")
+    if max_rows > MAX_ROWS_CEILING:
+        raise GuardrailError(
+            f"max_rows must not exceed {MAX_ROWS_CEILING} (got {max_rows})."
+        )
 
     # Trailing separators need no handling here: `extract_statements` reports
     # "SELECT 1; ; " as one statement and a bare ";" as none, so both the
@@ -490,7 +558,11 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
 
     canonical = _canonical_statement(stmt, tree)
 
-    guarded = f"SELECT * FROM (\n{canonical}\n) AS _guarded LIMIT {int(max_rows)}"
+    # No `int()` around `max_rows` here: it is already an int by the checks at
+    # the top. The cast used to be the only thing standing between a float and
+    # the LIMIT, and it did that by truncating — `max_rows=2.9` became `LIMIT 2`
+    # without a word to anyone.
+    guarded = f"SELECT * FROM (\n{canonical}\n) AS _guarded LIMIT {max_rows}"
     # The wrapper is the last thing an attacker can aim at: closing it early and
     # appending statements is how the old guard was escaped. Re-parsing the
     # finished text proves that what will actually be executed is still exactly

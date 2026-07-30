@@ -174,6 +174,76 @@ rephrases a wrapper failure is unreachable by any payload once the wrapped text
 is generated, so its test fakes a broken normalizer too. Both are insurance
 against a future release or refactor, and neither can be proved by a query.
 
+**Amendment (2026-07-30, same audit) — the allow-lists are checked against a
+surface, and `guard_query`'s own arguments are part of the policy.** The audit's
+third finding was not a bypass. It was that three things the guard depends on
+were not pinned by any test, each demonstrated by a mutation that left the
+then-291-test suite entirely green:
+
+```
++ read_text, read_blob, sniff_csv  to ALLOWED_FUNCTIONS  -> 291 green
+- payments, communications       from ALLOWED_RELATIONS  -> 291 green
++ information_schema, pg_catalog   to ALLOWED_SCHEMAS    -> 291 green
+```
+
+Every test proved that a name *absent* from a list is refused; none proved the
+lists hold the right names, and three of the nine allow-listed relations appeared
+in no payload at all. This is the mutation shaped like a real pull request — it
+*relaxes* the policy rather than deleting a check — and enumerating three more
+counter-examples would have left the same hole one name wider. So the lists are
+now compared against a full surface: the function allow-list against **every**
+table function in `duckdb_functions()` (five row generators named as the only
+exceptions, so a file reader added by a future release or by hand is caught on
+sight), and the relation allow-list against the ledger's own catalog, partitioned
+into what policy allows and what it forbids. The schema list is pinned by
+payloads whose *bare* name is allow-listed (`information_schema.customers`), the
+only form that only the schema check can refuse.
+
+**`guard_query` promised `GuardrailError` "on any violation" and five inputs
+escaped it.** `guard_query(123)` raised `AttributeError`, `max_rows="5"`
+`TypeError`, `max_rows=float("inf")` `OverflowError` — and `tools.py` and
+`mcp_server/server.py` catch `GuardrailError` and `duckdb.Error` only, so all
+three left the tool as a traceback rather than a refusal the model could act on.
+Two more did not raise at all: `max_rows=2.9` truncated to `LIMIT 2` in silence
+(the `int()` cast in the wrapper was doing that), and `max_rows=10**30` produced
+a LIMIT with thirty zeroes — no row cap, on the surface whose whole job is to
+cap. The arguments are now validated like any other input, and the guard carries
+its own `MAX_ROWS_CEILING`. `Settings.max_rows` already had `le=10_000`, but that
+bounds the *environment variable*; `plan_replay`, the MCP server and every test
+pass their own number straight through. The number is deliberately written twice
+— `sql_guard` imports nothing from the app, because it is the security surface —
+and a test compares the two bounds so the copies cannot drift.
+
+**A deeply nested query crashed instead of being refused.** `SELECT 1+1+1+…` at
+494 terms — 996 characters, nothing a model would hesitate to emit — exhausted
+Python's stack inside the tree walk and raised `RecursionError`. DuckDB's parser
+has a depth limit of its own but only trips at 1000, so the 494–999 band was a
+crash rather than a decision, and 494 was not even fixed: it is whatever stack
+remains when `guard_query` is called, so the threshold moved with the caller. The
+walk now carries a depth limit of 250 frames and refuses past it, measured
+against a worst case of **18** across every payload both suites accept plus an
+aging report written to be worse than any of them.
+
+Measured by mutation on the resulting suite (319 tests), all red: poisoning the
+function list **1** · removing two relations **2** · adding `internal_notes`
+**35** · opening the schema list **3** · deleting the `sql` type check **3** ·
+deleting the `max_rows` type check **3** · deleting the ceiling **2** · drifting
+the ceiling from the settings bound **1** · deleting the depth guard **1** ·
+setting the depth limit to 4, the over-restrictive direction, **101** · returning
+a wrapper that ignores its input **19** · re-opening the catalog hole above **9**.
+
+Two results recorded because they are the unflattering ones. First, the finding
+about the wrapper was overstated in the audit and is corrected here: a
+`guard_query` that discarded its input and returned `SELECT * FROM (SELECT 1) …`
+passes all **18** `test_allowed` cases, but **12** other tests do turn red — all
+of them end-to-end ones that execute the result and read rows. The property was
+held by the tests that happen to run queries, not by anything that stated it; it
+is stated now. Second, the same mutation exercise applied to the *tests* instead
+of the guard: of seven mutations that gut assertions in the new block — emptying
+loops, dropping the reason a refusal must give, comparing a tree to `is not None`
+— **six stay green**. Nothing covers a test file. What holds it is that these
+mutations were run at all.
+
 **Not fixed here, and named rather than left quiet.** An error raised while
 *executing* the guarded query still reaches the model with the wrapper's line
 numbering, through `tools.py` and `mcp_server/server.py`:

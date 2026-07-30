@@ -44,8 +44,9 @@ FOR`, `TRIM(BOTH … FROM …)`, `DECIMAL`/`VARCHAR` casts, `WITH t(a)`, `now()`
 DAY`** and schema-qualified references to allow-listed tables were all being refused. The old
 relation scanner read the `FROM` inside `EXTRACT` as a relation list.
 
-**291 tests** (135 pre-existing + 126 adversarial kept as a regression floor + 11 from the
-catalog fix below + 19 from the normalization fix below). **First CI
+**319 tests** (135 pre-existing + 126 adversarial kept as a regression floor + 11 from the
+catalog fix below + 19 from the normalization fix below + 28 from the "what the suite did not
+pin" block below). **First CI
 workflow this repo has ever had** — there was none, so nothing ran unless someone remembered —
 plus ruff + mypy gates, both clean.
 
@@ -104,6 +105,41 @@ that rephrases a wrapper failure is unreachable by any real payload. Both are in
 future DuckDB release or refactor, and neither can be proved by a query — so both say so in the
 code rather than posing as live checks.
 
+**2026-07-30 — what the suite did not pin (fixed, ADR-022 amendment).** Third and last finding
+of the same blind audit, and the only one that was not a bypass: three things the guard depends
+on had no test holding them. Each was demonstrated by a mutation that left all **291** tests
+green — `+ read_text/read_blob/sniff_csv` to the function list (and
+`SELECT * FROM read_text('/etc/passwd')` comes back guarded), `- payments/communications` from
+the relation list (and `SELECT * FROM payments` comes back refused), `+ information_schema` to
+the schema list. Every test proved a name *absent* from a list is refused; none proved the lists
+hold the right names. **The lists are now checked against a surface, not against more examples:**
+the function list against every table function in `duckdb_functions()` (five row generators named
+as the only exceptions), the relation list against the ledger's own catalog partitioned into
+allowed/forbidden, the schema list by payloads whose bare name is allow-listed — the only form
+only the schema check can refuse.
+
+**`guard_query` promised `GuardrailError` "on any violation" and five inputs escaped it.**
+`guard_query(123)` → `AttributeError`, `max_rows="5"` → `TypeError`, `max_rows=float('inf')` →
+`OverflowError`, none of which `tools.py` / `mcp_server/server.py` catch; plus two that did not
+raise at all — `max_rows=2.9` truncated to `LIMIT 2` silently and `max_rows=10**30` produced a
+LIMIT with thirty zeroes, i.e. no cap on the surface whose job is capping. Arguments are now
+validated like any other input, with a `MAX_ROWS_CEILING` the guard owns (`Settings.max_rows`
+bounds only the env var; a test compares the two so the copies cannot drift). And
+`SELECT 1+1+1+…` at 494 terms / 996 characters **crashed** with `RecursionError` inside the tree
+walk — DuckDB's own limit only trips at 1000, so that whole band was a crash instead of a
+decision, at a threshold that moved with the caller's stack. The walk now refuses past 250
+frames, against a measured worst case of **18** over every accepted payload.
+
+**Mutation results, including the ones that do not flatter the work.** Twelve mutations of the
+guard, all red (poisoned function list 1 · two relations removed 2 · `internal_notes` added 35 ·
+schema list opened 3 · `sql` type check 3 · `max_rows` type check 3 · ceiling 2 · ceiling drift
+1 · depth guard 1 · depth limit set to 4 → 101 · `SELECT 1` stand-in 19 · ROUND 4 hole re-opened
+9). The audit's claim that *nothing* pinned the wrapper's contents was **overstated and is
+corrected**: the stand-in passes all 18 `test_allowed` cases but 12 other tests do fail — all of
+them end-to-end ones that execute the result. The property was held by accident, not by
+statement. And of seven mutations applied to the **tests** instead of the guard, **six stay
+green**: nothing covers a test file, which is why the mutations get run.
+
 > ⚠️ **OPEN — the same leak through the execution path.** An error raised while *executing* the
 > guarded query still returns the wrapper's line numbering to the model, via `tools.py` and
 > `mcp_server/server.py`: `Binder Error: … LINE 2: SELECT count_star() FROM customers GROUP BY
@@ -120,8 +156,8 @@ code rather than posing as live checks.
 > Needs a design call (watchdog interrupt / row budget / killable subprocess) — see ADR-022.
 
 > ⚠️ **OPEN — the live demo still runs the vulnerable guard.** Re-measured 2026-07-30 after the
-> normalization fix: `git rev-list --count space/main..origin/main` = **52** (was 50; every guard
-> fix since widens this gap rather than closing it). The deploy target is the **`space`
+> pinning fix: `git rev-list --count space/main..origin/main` = **54**, this commit included
+> (50 → 52 → 54; every guard fix since widens this gap rather than closing it). The deploy target is the **`space`
 > remote** (`space/main`), not a `space-deploy` branch — that branch no longer exists on `origin`
 > and the earlier "43 commits behind `space-deploy`" line named a target that is gone. `git push
 > origin` does not deploy the HF Space. Still needs a dedicated session: the cherry-pick could not
