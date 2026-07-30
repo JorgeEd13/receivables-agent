@@ -88,6 +88,40 @@ The previous approach compared a synthesised `"schema.table"` string against CTE
 names, which was defeated by quoting a dot into a CTE name
 (`WITH "main.internal_notes" AS (…)`).
 
+**Amendment (2026-07-30, from a blind code audit) — catalog qualification is
+refused outright.** The walk read `table_name` and `schema_name` and never read
+`catalog_name`, the third field a `BASE_TABLE` node carries. In a three-part name
+the database lands in `catalog_name` and `main` lands in `schema_name`, so the
+schema check saw an allow-listed schema, fell through, and only the bare name was
+ever tested:
+
+```
+SELECT * FROM evildb.main.customers               -> was ACCEPTED
+SELECT * FROM "/tmp/other.duckdb".main.customers  -> was ACCEPTED
+```
+
+Latent, not live: `ATTACH` does not serialize as a select statement and the
+ledger connection carries `enable_external_access=false` with
+`lock_configuration=true`, so no second catalog was reachable. What it did cost
+immediately is the thing the ADR-003 correction below is about — the
+confidentiality half of the guard was standing on one layer again.
+
+The choice is to refuse **every** catalog-qualified reference rather than
+allow-list catalog names. A catalog allow-list would have to contain the ledger's
+own catalog, which is named after its file (`data/ledger.duckdb` → `ledger`) —
+that pins a deployment's file name into the guard and creates a second thing to
+keep in sync. With exactly one database open and nothing attachable, a three-part
+name is never needed to reach the data. The price is that `ledger.main.customers`
+— a true name for a real table — is refused; the refusal names the full path, so
+it is diagnosable. If it ever costs a real query, the repair is a schema hint that
+stops the model writing three-part names, not an allow-list of catalogs.
+
+Measured by mutation, on the suite as it stands: deleting the branch turns **8**
+tests red; replacing it with an allow-list that admits `memory` and `ledger` turns
+**2** red; a branch that refuses but does not say *which* catalog turns **7** red —
+and only **1** if the message assertion is removed along with it, which is what
+that assertion is there to hold.
+
 **Consequences.**
 
 - **Positive.** The whole class of scanner/executor disagreement is gone. The

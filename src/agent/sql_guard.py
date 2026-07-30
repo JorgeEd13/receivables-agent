@@ -30,7 +30,9 @@ Design rules (do not relax these to "make a query pass" — fix the query):
   semicolons in text;
 * it must be a ``SELECT`` / ``WITH`` read query — enforced by the fact that
   DuckDB refuses to serialize anything else as a select statement;
-* every table in the tree must be in the allow-list (CTE names excepted);
+* every table in the tree must be in the allow-list (CTE names excepted), and a
+  name qualified with a *catalog* (``db.main.t``) is refused outright — one
+  database is open, none can be attached, so no legitimate query needs one;
 * every function in the tree must be in the allow-list. A CTE name **never**
   exempts a function: DuckDB resolves ``name(`` to a function no matter what a
   CTE is called, so allowing that would let ``WITH duckdb_settings AS (…)``
@@ -138,9 +140,15 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset(
     }
 )
 
-# The ledger's own schema. A reference qualified with anything else —
-# `information_schema`, `pg_catalog`, an attached database — is reaching for the
+# The ledger's own schemas. A two-part name qualified with anything else —
+# `information_schema.tables`, `pg_catalog.pg_tables` — is reaching for the
 # catalog, not for the data, and is refused by name.
+#
+# This list only ever sees the SECOND part of a name. In a three-part name the
+# database goes to `catalog_name` and `main` goes to `schema_name`, so such a
+# name clears this list while saying nothing about which database it reads.
+# That half is not this list's job: `_collect` refuses catalog qualification
+# outright.
 ALLOWED_SCHEMAS: frozenset[str] = frozenset({"main", "memory", "temp"})
 
 DEFAULT_MAX_ROWS = 200
@@ -239,6 +247,16 @@ def _collect(
     defeatable by *quoting a dot into a CTE name* — ``WITH "main.internal_notes"
     AS (…)``. Qualified references now skip the CTE set entirely instead of
     being compared against it.
+
+    **A qualified name is read in all of its parts.** The tree carries three
+    fields — ``catalog_name``, ``schema_name``, ``table_name`` — and this walk
+    read two of them. In a three-part name the database lands in
+    ``catalog_name`` and ``main`` lands in ``schema_name``, so the schema branch
+    saw an allow-listed schema and only the bare name was ever checked:
+    ``evildb.main.customers`` and ``"/tmp/other.duckdb".main.customers`` were
+    accepted. Reading two thirds of a name is the same class of bug as keying
+    the check on the node type — the field is there and the check did not look
+    at it.
     """
     if isinstance(node, dict):
         # CTEs declared here are in scope for this subtree only — and NOT inside
@@ -292,6 +310,7 @@ def _collect(
         if "table_name" in node:
             bare = str(node.get("table_name") or "").lower()
             schema = str(node.get("schema_name") or "").lower()
+            catalog = str(node.get("catalog_name") or "").lower()
             if kind != "BASE_TABLE":
                 # SHOW_REF covers two different things. A catalog listing
                 # (`SHOW ALL TABLES`, `SHOW DATABASES`) has no query sub-tree
@@ -303,6 +322,16 @@ def _collect(
                     pseudo.add(kind.lower() or "unknown")
             elif not bare:
                 pseudo.add(kind.lower() or "unknown")
+            elif catalog:
+                # Three-part name. There is exactly one database open on the
+                # ledger connection and `ATTACH` is refused upstream, so no
+                # legitimate query needs to name a catalog at all — the whole
+                # form is refused rather than matched against a list of catalog
+                # names, which would only track the ledger's file name. The full
+                # path goes into the error so the refusal says which database
+                # was asked for. As with the schema branch, `scope` is not
+                # consulted: a CTE cannot be catalog-qualified.
+                tables.add(".".join(part for part in (catalog, schema, bare) if part))
             elif schema and schema not in ALLOWED_SCHEMAS:
                 tables.add(f"{schema}.{bare}")
             elif schema:

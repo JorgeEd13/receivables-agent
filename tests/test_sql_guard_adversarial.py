@@ -24,13 +24,18 @@ HOW TO READ THE SECTION HEADERS. Each numbered block below states the defect
 is a record of the break, not a description of today's guard. What is true today
 is what the assertions say: everything here is green against the current
 implementation. Where a round closed an earlier round's findings, a banner says
-so explicitly. Round 3's own findings are closed too (see the note at the end of
-this docstring), which is why no round-4 banner exists to say it.
+so explicitly; the newest block never carries one, because nothing has come
+after it yet to close it.
 
 ROUND 3 IS CLOSED. `_collect` now walks each CTE definition with only the CTEs
 declared *before* it in scope, so the forward-reference and self-reference
 payloads in R3-1 are refused. The R3 section header describes the walk as it was
 when those payloads were written.
+
+ROUND 4 did not come from an attack round. It came from an audit that read only
+`sql_guard.py` and this file, with no access to the design notes: two readers,
+independently, asked the same question — the tree carries `catalog_name`, and
+nothing ever reads it. R4 is that finding.
 """
 
 from __future__ import annotations
@@ -927,6 +932,10 @@ R3_CORRECTLY_REJECTED = [
     # Two-part and three-part names whose schema is not the ledger's own.
     ("SELECT * FROM information_schema.tables", "qualified_information_schema"),
     ("SELECT * FROM pg_catalog.pg_tables", "qualified_pg_catalog"),
+    # NOTE: this one does NOT discriminate on the catalog. It was written as a
+    # three-part case, but `tables` is not an allow-listed relation, so it is
+    # refused on the bare name and would stay green with the catalog unread.
+    # The tests that actually pin the catalog are in R4.
     ("SELECT * FROM system.information_schema.tables", "three_part_catalog_qualified"),
     # A quoted dot in a CTE name no longer buys anything, because a qualified
     # reference does not consult the CTE set at all.
@@ -1010,3 +1019,114 @@ def test_recursive_ctes_are_refused_on_purpose(sql: str, label: str) -> None:
     """Documents the trade-off above. If this ever passes, the exemption is back."""
     with pytest.raises(GuardrailError):
         guard_query(sql)
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 4 — the third part of the name.
+#
+# `_collect` read `table_name` and `schema_name` and never read `catalog_name`.
+# A `BASE_TABLE` node carries all three:
+#
+#   SELECT * FROM evildb.main.customers
+#   -->  {"type": "BASE_TABLE", "catalog_name": "evildb",
+#         "schema_name": "main", "table_name": "customers"}
+#
+# In a three-part name the database goes to `catalog_name` and `main` goes to
+# `schema_name`, so the schema branch saw an allow-listed schema, fell through
+# to the bare-name check, and `customers` is allow-listed. Measured then:
+#
+#   SELECT * FROM evildb.main.customers               -> ACCEPTED
+#   SELECT * FROM "/tmp/other.duckdb".main.customers  -> ACCEPTED
+#
+# Severity, stated honestly: LATENT, not live. Nothing could be attached —
+# `ATTACH` is refused before the walk (it does not serialize as a select) and
+# the ledger connection carries `enable_external_access=false` with
+# `lock_configuration=true`. It becomes an exploit the day a second catalog is
+# attached. The cost that was already real is that the confidentiality half of
+# the guard was one layer again, which is the thing ADR-022 exists to prevent.
+#
+# WHY THESE TESTS ASSERT ON THE MESSAGE. End-to-end blocking proves nothing
+# here: `evildb` does not exist on the connection, so DuckDB refuses the query
+# by itself and `assert_blocked` stays green whether or not the guard ever looks
+# at the catalog. The only assertion that discriminates is that the guard names
+# the whole path in its refusal. That was the flaw in the pre-existing
+# `three_part_catalog_qualified` case in R3-4 — it was refused on `tables`, a
+# name that is not allow-listed anyway.
+# --------------------------------------------------------------------------- #
+
+# Every part except the catalog is allow-listed: `main` is in ALLOWED_SCHEMAS
+# and the bare name is in ALLOWED_RELATIONS. Nothing but the catalog check can
+# refuse these, which is what makes them a discriminator.
+R4_CATALOG_QUALIFIED = [
+    ("SELECT * FROM evildb.main.customers", "evildb.main.customers"),
+    ("SELECT * FROM pg_catalog.main.invoices", "pg_catalog.main.invoices"),
+    ('SELECT * FROM "/tmp/other.duckdb".main.payments',
+     "/tmp/other.duckdb.main.payments"),
+    ("SELECT * FROM memory.main.v_dso", "memory.main.v_dso"),
+    ("SELECT c.name FROM evildb.main.customers AS c", "evildb.main.customers"),
+    ("WITH t AS (SELECT * FROM evildb.main.invoices) SELECT * FROM t",
+     "evildb.main.invoices"),
+]
+
+
+@pytest.mark.parametrize(
+    "sql,path", R4_CATALOG_QUALIFIED, ids=[p[1] for p in R4_CATALOG_QUALIFIED]
+)
+def test_r4_catalog_qualified_name_is_refused_naming_the_catalog(
+    sql: str, path: str
+) -> None:
+    with pytest.raises(GuardrailError) as exc:
+        guard_query(sql)
+    # The full three-part path, not just the bare name: a guard that refused
+    # this on `customers` alone would be refusing the wrong thing.
+    assert path in str(exc.value), str(exc.value)
+
+
+def test_r4_a_cte_cannot_launder_a_catalog_qualified_name() -> None:
+    """A CTE named after the table does not exempt the qualified reference.
+
+    Same property the schema branch has: a qualified name never consults the CTE
+    set, because a CTE cannot be catalog-qualified in the first place.
+    """
+    with pytest.raises(GuardrailError) as exc:
+        guard_query(
+            'WITH "evildb.main.customers" AS (SELECT 1), customers AS (SELECT 1) '
+            "SELECT * FROM evildb.main.customers"
+        )
+    assert "evildb.main.customers" in str(exc.value)
+
+
+# The decision, recorded rather than left implicit: catalog qualification is
+# refused OUTRIGHT — there is no allow-list of catalog names. The ledger's own
+# catalog is named after its file (`data/ledger.duckdb` -> `ledger`, and this
+# suite's throwaway ledger is also `ledger`), so an allow-list here would pin
+# a deployment's file name into the guard and grow a second thing to keep in
+# sync. Exactly one database is open on the ledger connection and nothing can
+# attach another, so a three-part name is never needed to reach the data.
+#
+# The price is this test: the true name of the ledger's own catalog is refused.
+# It is paid knowingly. If it ever costs a real query, the fix is a schema hint
+# that stops the model writing three-part names — not an allow-list of catalogs.
+def test_r4_the_ledgers_own_catalog_is_refused_too() -> None:
+    with pytest.raises(GuardrailError):
+        guard_query("SELECT * FROM ledger.main.customers")
+
+
+# Paired against the block above so a lazy repair cannot pass: refusing *all*
+# qualification would turn these red. Two-part names against the ledger's own
+# schema are the form the agent actually emits.
+R4_STILL_ALLOWED = [
+    ("SELECT * FROM main.customers", "two_part_allowed_schema"),
+    ("SELECT count(*) AS n FROM main.invoices", "two_part_with_aggregate"),
+    ("SELECT * FROM customers", "bare_name"),
+]
+
+
+@pytest.mark.parametrize(
+    "sql,label", R4_STILL_ALLOWED, ids=[q[1] for q in R4_STILL_ALLOWED]
+)
+def test_r4_unqualified_and_schema_qualified_names_still_pass(
+    con, sql: str, label: str
+) -> None:
+    con.execute(f"SELECT * FROM (\n{sql}\n) AS _sanity LIMIT 1").fetchall()
+    assert run_guarded(con, sql) is not None

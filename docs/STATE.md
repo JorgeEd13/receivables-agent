@@ -44,7 +44,8 @@ FOR`, `TRIM(BOTH … FROM …)`, `DECIMAL`/`VARCHAR` casts, `WITH t(a)`, `now()`
 DAY`** and schema-qualified references to allow-listed tables were all being refused. The old
 relation scanner read the `FROM` inside `EXTRACT` as a relation list.
 
-**261 tests** (135 pre-existing + 126 adversarial kept as a regression floor). **First CI
+**272 tests** (135 pre-existing + 126 adversarial kept as a regression floor + 11 from the
+catalog fix below). **First CI
 workflow this repo has ever had** — there was none, so nothing ran unless someone remembered —
 plus ruff + mypy gates, both clean.
 
@@ -57,6 +58,24 @@ banners; round 3 has none, because it was last — so its header still describes
 longer exists. Fixed by adding a "how to read the section headers" note to the module docstring
 (the headers are a record of the break, the assertions are the present tense) plus a round-3
 closing note, and by moving the three false sentences to the past tense.
+
+**2026-07-30 — `catalog_name` was never read (fixed, ADR-022 amendment).** A blind audit of
+`sql_guard.py` — two readers with the code and nothing else, no design notes — found that the
+tree walk read two of the three qualification fields. A three-part name puts the database in
+`catalog_name` and `main` in `schema_name`, so `SELECT * FROM evildb.main.customers` and
+`SELECT * FROM "/tmp/other.duckdb".main.customers` were **accepted**. Latent, not live: nothing
+could be attached (`ATTACH` does not serialize as a select; the connection has
+`enable_external_access=false` + `lock_configuration=true`). Now **any** catalog-qualified
+reference is refused, naming the full path — no allow-list of catalog names, because the ledger's
+own catalog is just its file name. The price is knowingly paid: `ledger.main.customers` is
+refused too, and a test pins that.
+
+**The pre-existing test named `three_part_catalog_qualified` was passing for the wrong reason** —
+`system.information_schema.tables` is refused on `tables`, which is not allow-listed either way,
+so it stayed green with the hole wide open. The new R4 block uses payloads where the schema and
+the bare name are both allow-listed, so only the catalog check can refuse them, and asserts on
+the **message**: end-to-end blocking proves nothing here, since a catalog that does not exist is
+refused by DuckDB regardless of the guard.
 
 > ⚠️ **OPEN — availability.** The guard bounds what can be READ, not how much WORK a query
 > may do. `WITH RECURSIVE invoices(n) AS (… n < 100000000) …`, `repeat('a', 1000000000)` and a
