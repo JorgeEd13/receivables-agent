@@ -41,8 +41,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install (package + dev extras)
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      # `mcp` is included on purpose: without it `tests/test_mcp.py` fails at
+      # COLLECTION and the whole suite reports an error instead of running. The
+      # suite must not depend on which extras a given machine happens to have.
+      - name: Install (package + dev and mcp extras)
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,mcp]"
 
       # Offline by construction: no LLM provider extra is installed, so a test
       # that reaches for a live model fails here instead of passing quietly on a

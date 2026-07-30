@@ -48,8 +48,8 @@ def seed_curated() -> int:
     are instant + correct from the first request and survive every restart (ADR-012).
     """
     import chromadb
-
     from data.curated_plans import curated_plans
+
     from src.agent.plan_cache import Plan, get_plan_cache
     from src.agent.sql_guard import GuardrailError, guard_query
     from src.core.config import get_settings
@@ -121,7 +121,7 @@ def seed_via_model() -> int:
         # the plan on a miss automatically.
         agent.invoke({"messages": [{"role": "user", "content": question}]})
         # Confirm it landed (a lookup now hits).
-        if agent._cache.lookup(question) is not None:  # noqa: SLF001 - seeding tool
+        if agent._cache.lookup(question) is not None:
             warmed += 1
             print(f"  ✓ cached plan for: {question}")
         else:

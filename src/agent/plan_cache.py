@@ -74,7 +74,7 @@ class Plan:
         return json.dumps([{"tool": s.tool, "args": s.args} for s in self.steps])
 
     @classmethod
-    def from_json(cls, raw: str) -> "Plan":
+    def from_json(cls, raw: str) -> Plan:
         data = json.loads(raw)
         return cls(steps=tuple(ToolStep(tool=d["tool"], args=d["args"]) for d in data))
 

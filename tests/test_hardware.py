@@ -10,8 +10,8 @@ from __future__ import annotations
 from src.agent.providers import AUTO_MODEL, resolve_ollama_model
 from src.core.config import Settings
 from src.core.hardware import (
-    HardwareProfile,
     _CATALOG,
+    HardwareProfile,
     recommend_model,
 )
 

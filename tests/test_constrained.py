@@ -18,12 +18,11 @@ from pydantic import PrivateAttr
 from src.agent.constrained import (
     FINAL_ANSWER,
     ConstrainedToolModel,
-    build_schema,
     _parse,
+    build_schema,
 )
 from src.agent.providers import should_constrain
 from src.core.config import Settings
-
 
 # --- fixtures ---------------------------------------------------------------
 

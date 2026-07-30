@@ -310,7 +310,7 @@ def list_downloaded_models(base_url: str) -> list[str]:
 
     try:
         url = f"{base_url.rstrip('/')}/api/tags"
-        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 (local URL)
+        with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         names = [m["name"] for m in data.get("models", [])]
     except Exception:

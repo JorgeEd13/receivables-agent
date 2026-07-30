@@ -68,6 +68,12 @@ ignore = [
     "E501",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom IS a function call in an argument default
+# (`user = Depends(auth)`). Ruff's B008 is right in general and wrong for FastAPI
+# route signatures specifically.
+"src/api/app.py" = ["B008"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
 

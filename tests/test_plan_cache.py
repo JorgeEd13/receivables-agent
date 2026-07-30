@@ -37,7 +37,6 @@ from src.agent.plan_cache import (
 from src.agent.plan_replay import ReplayError, replay_plan
 from src.rag.embeddings import DeterministicEmbeddingFunction
 
-
 # --- fixtures ---------------------------------------------------------------
 
 
@@ -261,6 +260,7 @@ def test_curated_plans_are_all_guard_valid_and_replayable() -> None:
     """Every curated plan (data/curated_plans.py) must be safe to bake: only
     replayable tools, and every query_ledger SQL passes sql_guard read-only."""
     from data.curated_plans import curated_plans
+
     from src.agent.plan_cache import REPLAYABLE_TOOLS
     from src.agent.sql_guard import guard_query
 

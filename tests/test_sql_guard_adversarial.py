@@ -22,6 +22,8 @@ Everything is offline and takes well under a second. No LLM.
 
 from __future__ import annotations
 
+import contextlib
+
 import duckdb
 import pytest
 
@@ -197,10 +199,8 @@ def test_wrapper_cannot_be_escaped_by_hidden_semicolons() -> None:
 def test_nothing_can_be_created_end_to_end(con) -> None:
     """Guarantee 1: nothing may be created. Temp objects are still objects, and
     a read-only DuckDB connection happily creates them."""
-    try:
+    with contextlib.suppress(GuardrailError, duckdb.Error):
         con.execute(guard_query(WRAPPER_ESCAPE))
-    except (GuardrailError, duckdb.Error):
-        pass
     with pytest.raises(duckdb.Error):
         con.execute("SELECT * FROM pwned")
 
@@ -211,10 +211,8 @@ def test_prepared_statements_cannot_be_created(con) -> None:
         "PREPARE evil AS SELECT 1; "
         "SELECT * FROM (SELECT 1"
     )
-    try:
+    with contextlib.suppress(GuardrailError, duckdb.Error):
         con.execute(guard_query(sql))
-    except (GuardrailError, duckdb.Error):
-        pass
     with pytest.raises(duckdb.Error):
         con.execute("EXECUTE evil")
 

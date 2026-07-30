@@ -16,13 +16,13 @@ import duckdb
 from langgraph.prebuilt import create_react_agent
 
 from src.agent.cached_agent import CachedAgent
+from src.agent.ledger import connect_readonly
 from src.agent.plan_cache import get_plan_cache
 from src.agent.providers import build_chat_model, has_credentials
 from src.agent.schema_hints import SCHEMA_HINTS, SCHEMA_HINTS_BRIEF
 from src.agent.tools import make_query_ledger_tool, make_search_policy_tool
 from src.agent.turn_control import ToolCallTracker
 from src.core.config import Settings, get_settings
-from src.agent.ledger import connect_readonly
 from src.rag.embeddings import default_embedding_function
 from src.rag.index import ensure_policy_index
 
@@ -104,7 +104,7 @@ def build_dynamic_model(settings: Settings, tools: list):
 
     model = primary.with_fallbacks(fallbacks) if fallbacks else primary
 
-    def _dynamic(state, runtime):  # noqa: ARG001 - signature required by langgraph
+    def _dynamic(state, runtime):
         return model
 
     return _dynamic

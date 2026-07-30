@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, Callable
-
-# A tool wrapper (see ``src.agent.turn_control.ToolCallTracker.wrap``): decorates a
-# tool's callable to dedup repeats + record the turn's calls. ``None`` = unwrapped.
-ToolWrap = Callable[[str, Callable[..., str]], Callable[..., str]]
+from typing import Any
 
 import duckdb
 from chromadb.api.models.Collection import Collection
@@ -26,6 +23,10 @@ from pydantic import BaseModel, Field
 from src.agent.ledger import run_query
 from src.agent.schema_hints import SCHEMA_HINTS
 from src.agent.sql_guard import GuardrailError, guard_query
+
+# A tool wrapper (see ``src.agent.turn_control.ToolCallTracker.wrap``): decorates a
+# tool's callable to dedup repeats + record the turn's calls. ``None`` = unwrapped.
+ToolWrap = Callable[[str, Callable[..., str]], Callable[..., str]]
 
 _TOOL_DESCRIPTION = (
     "Run a single read-only DuckDB SELECT against the receivables ledger and "
@@ -73,7 +74,7 @@ def make_query_ledger_tool(
             return json.dumps({"error": "sql_error", "detail": str(exc)})
 
         records = [
-            {col: _jsonify(val) for col, val in zip(columns, row)} for row in rows
+            {col: _jsonify(val) for col, val in zip(columns, row, strict=False)} for row in rows
         ]
         return json.dumps(
             {
@@ -138,7 +139,7 @@ def make_search_policy_tool(
                 "text": document,
                 "distance": distance,
             }
-            for document, meta, distance in zip(documents, metadatas, distances)
+            for document, meta, distance in zip(documents, metadatas, distances, strict=False)
         ]
         return json.dumps({"query": query, "result_count": len(results), "results": results})
 

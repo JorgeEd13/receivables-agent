@@ -136,7 +136,7 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset(
     }
 )
 
-# The ledger's own schema. A reference qualified with anything else — 
+# The ledger's own schema. A reference qualified with anything else —
 # `information_schema`, `pg_catalog`, an attached database — is reaching for the
 # catalog, not for the data, and is refused by name.
 ALLOWED_SCHEMAS: frozenset[str] = frozenset({"main", "memory", "temp"})

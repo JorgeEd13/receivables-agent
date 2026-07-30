@@ -63,7 +63,7 @@ def run_guarded_query(
     except duckdb.Error as exc:
         return json.dumps({"error": "sql_error", "detail": str(exc)})
 
-    records = [{col: _jsonify(val) for col, val in zip(columns, row)} for row in rows]
+    records = [{col: _jsonify(val) for col, val in zip(columns, row, strict=False)} for row in rows]
     return json.dumps(
         {
             "columns": columns,

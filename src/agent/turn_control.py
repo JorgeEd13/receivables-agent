@@ -38,9 +38,10 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 # The nudge appended to a de-duplicated tool result. Terse and imperative — a tiny
 # model follows one firm instruction better than a paragraph (ADR-013).

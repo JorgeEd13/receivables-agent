@@ -131,7 +131,7 @@ class ConstrainedToolModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "constrained-tool-model"
 
-    def bind_tools(self, tools: list[Any], **kwargs: Any) -> "ConstrainedToolModel":  # type: ignore[override]
+    def bind_tools(self, tools: list[Any], **kwargs: Any) -> ConstrainedToolModel:  # type: ignore[override]
         clone = ConstrainedToolModel(base=self.base)
         clone._tools = list(tools)
         clone._schema = build_schema(clone._tools)

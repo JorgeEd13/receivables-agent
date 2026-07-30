@@ -22,8 +22,9 @@ number is current even after the ledger changes.
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 import duckdb
 from chromadb.api.models.Collection import Collection

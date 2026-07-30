@@ -14,12 +14,11 @@ found.
 
 from __future__ import annotations
 
-from typing import cast
-
 import hashlib
 import re
+from typing import cast
 
-from chromadb.api.types import Documents, Embeddings, EmbeddingFunction
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from chromadb.utils.embedding_functions import register_embedding_function
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -66,5 +65,5 @@ class DeterministicEmbeddingFunction(EmbeddingFunction[Documents]):
         return {"dim": self._dim}
 
     @classmethod
-    def build_from_config(cls, config: dict) -> "DeterministicEmbeddingFunction":
+    def build_from_config(cls, config: dict) -> DeterministicEmbeddingFunction:
         return cls(dim=config.get("dim", 256))

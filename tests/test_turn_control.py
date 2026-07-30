@@ -18,7 +18,6 @@ from src.agent.turn_control import (
     narrate_start,
 )
 
-
 # --- Dedup / redundant-call short-circuit (8.2) -------------------------- #
 
 
@@ -102,8 +101,8 @@ def test_dedup_works_through_a_structured_tool() -> None:
     Guards the integration seam: ``make_*_tool`` builds the StructuredTool from the
     *wrapped* function, so dedup must survive langchain's arg parsing (kwargs).
     """
-    from pydantic import BaseModel, Field
     from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
 
     from src.agent.tools import make_query_ledger_tool  # noqa: F401 (import smoke)
 

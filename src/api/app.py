@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import secrets
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.responses import StreamingResponse
