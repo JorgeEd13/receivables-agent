@@ -78,7 +78,11 @@ ignore = [
 known-first-party = ["src"]
 
 [tool.mypy]
-python_version = "3.11"
+# Set to 3.12 because numpy's shipped stubs use PEP 695 `type` statements that
+# mypy refuses to parse under an older target — it fails on the stub before it ever
+# reaches this code. The package still supports 3.11; that is proven by the CI test
+# matrix running there, which is a stronger check than a type-checker flag.
+python_version = "3.12"
 files = ["src"]
 ignore_missing_imports = true
 # Ratchet, not a wall: these are the levels the code passes TODAY and CI holds.

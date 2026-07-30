@@ -17,7 +17,13 @@ import pytest
 # The MCP server lives behind the `mcp` extra. Without this, a clone that did not
 # install it fails at COLLECTION — the whole suite errors out rather than
 # reporting the tests it could run. CI installs `.[dev,mcp]` so these do execute.
-pytest.importorskip("mcp", reason="install the 'mcp' extra to run the MCP tests")
+# Skip on the EXACT module the server imports, not the top-level package:
+# `mcp` can import fine while `mcp.server.fastmcp` is absent in some releases,
+# and then the guard passes and collection dies anyway.
+pytest.importorskip(
+    "mcp.server.fastmcp",
+    reason="needs the 'mcp' extra with FastMCP (mcp.server.fastmcp)",
+)
 import pytest
 from mcp_server.server import run_guarded_query
 
