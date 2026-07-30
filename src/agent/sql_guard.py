@@ -76,9 +76,11 @@ ALLOWED_RELATIONS: frozenset[str] = frozenset(
 
 # Read-safe functions the agent may call, in the CANONICAL names DuckDB's parser
 # reports — which are not always what was typed: `count(*)` arrives as
-# `count_star`, `extract(year FROM d)` as `date_part`, `now()` as
-# `current_timestamp`. Checking canonical names is the point: an attacker cannot
-# dodge the list by choosing a different spelling of the same function.
+# `count_star`, `extract(year FROM d)` as `date_part`, `a + b` as `+`, and
+# `INTERVAL 30 DAY` expands to `to_days` and `trunc` (measured on DuckDB 1.5.3 —
+# which is why names nobody types are on this list). Checking canonical names is
+# the point: an attacker cannot dodge the list by choosing a different spelling
+# of the same function.
 #
 # This is an ALLOW-list on purpose. A deny-list of dangerous functions is blind
 # to everything nobody remembered to add, and DuckDB ships new table functions

@@ -1,4 +1,8 @@
-"""Guardrail tests — the priority suite. Pure, offline, no LLM, no DuckDB.
+"""Guardrail tests — the priority suite. Pure, offline, no LLM, no data.
+
+The guard parses through DuckDB itself (ADR-022), so these do touch the DuckDB
+library — but only its parser, on an empty in-memory connection. No ledger, no
+network, no model.
 
 Covers the two failure modes that matter for a text-to-SQL agent:
   1. injection / escape attempts must be *rejected*;

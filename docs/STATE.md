@@ -29,8 +29,15 @@ Full reasoning in **ADR-022**.
 **Measured, and it changed a decision:** on DuckDB 1.5.3 the **anchor** term of
 `WITH RECURSIVE x AS (SELECT c FROM x UNION ALL …)` binds to a real base table named `x` and
 returns its rows — so "a CTE's own name is exempt in its own body" cannot be made safe by
-restricting it to the recursive form. **Recursive CTEs are now refused on purpose**, recorded in
-`tests/test_sql_guard_adversarial.py` with the measurement.
+restricting it to the recursive form. A CTE's own name is therefore **never** in scope inside its
+own body, `RECURSIVE` or not; recorded in `tests/test_sql_guard_adversarial.py` with the
+measurement.
+
+**Precise wording (this line used to be wrong — see the correction block in ADR-022):** there is
+**no recursion-specific rule** in the code. A self-reference is checked against the relation
+allow-list like any other name, so `WITH RECURSIVE t AS (… FROM t …)` is refused because `t` is
+not allow-listed, while `WITH RECURSIVE invoices AS (… FROM invoices …)` is **accepted**. Saying
+"recursive CTEs are refused" is false and gets falsified by one example.
 
 **It also got LESS restrictive where it was wrong:** `EXTRACT(year FROM d)`, `SUBSTRING … FROM …
 FOR`, `TRIM(BOTH … FROM …)`, `DECIMAL`/`VARCHAR` casts, `WITH t(a)`, `now()`, **`INTERVAL 30
