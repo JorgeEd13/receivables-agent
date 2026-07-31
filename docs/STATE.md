@@ -524,6 +524,31 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > 3. Hit `POST /api/chat` once (or watch the demo run) → note **one response latency**.
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
+> **2026-07-31 — OPEN: the dual-provider fallback has no test, and ADR-004's premise expired.**
+> A line-by-line audit of `graph/tools/providers/schema_hints/message_utils/constrained` ran **28
+> mutations against the suite; 19 stayed green**. Nothing was fixed in code this session — three
+> false comments were corrected and ADR-004 got a dated amendment. What is open:
+> 1. **No test calls `build_agent`.** Deleting the fallback wiring (`model = primary`), dropping
+>    `has_credentials`, or dropping the `fb != primary` check each leaves the suite at **346
+>    passed**. ADR-004's "covered by a build smoke check" was false.
+> 2. **Re-measured on langgraph 1.2.4:** `create_react_agent` no longer *rejects* a
+>    `RunnableWithFallbacks` — it constructs and **silently drops the fallback**. The dynamic-model
+>    callable is still what keeps it alive. The API is **deprecated since v1.0** (removal in v2.0),
+>    the pin `langgraph>=1.0` has **no ceiling**, and `langchain.agents.create_agent` **rejects the
+>    callable** — migration is not an import swap.
+> 3. **`SCHEMA_HINTS` has no owner.** Renaming `v_dso` to a non-existent view = **346 green**,
+>    while `ALLOWED_RELATIONS` *is* pinned against the real catalog (`R1-C3`). No drift today
+>    (checked by hand against `ledger.duckdb`); nothing enforces it tomorrow.
+> 4. **Constrained-path test gaps:** emptying the JSON-protocol hint (the tiny model's stopping
+>    criterion) = 346 green; `test_bind_tools_then_invoke…` asserts against `build_schema` itself
+>    (circular oracle — two schema mutations never turn it red); the tier threshold `<=` vs `<` is
+>    **indistinguishable by construction** (default max 3, catalog ranks jump 2 → 4).
+> 5. **`evals/run.py` carries a byte-identical third copy** of `final_text`/`tools_used` instead of
+>    importing `message_utils` — the evals can silently measure older behaviour.
+>
+> Tracked as `R1-C7`–`R1-C10`. Full walkthrough + reproducible snippets in the private study doc
+> (`repo-base-career/aprofundamentos/receivables-agent/R1-T3…md`), not in this repo.
+
 ## Done
 - 2026-07-02: **Phase 6 Layer 2 — grammar-constrained tool-calls (ADR-011).**
   - Probed native tool-calling on `qwen2.5:0.5b`/`1.5b` (real tools+prompt, 5

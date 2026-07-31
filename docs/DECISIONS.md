@@ -1039,6 +1039,32 @@ wired only when it has credentials, so an Ollama-only box still builds.
 - The callable signature is coupled to a LangGraph internal contract; pinned via
   `langgraph>=1.0` and covered by a build smoke check.
 
+### Amendment · 2026-07-31 — the premise changed, and the last bullet above was wrong
+
+Re-measured against the installed **langgraph 1.2.4 / langchain-core 1.4.0** (this ADR
+was written against 1.0). Three corrections, all reproducible with the snippet in
+`aprofundamentos/receivables-agent/R1-T3…md` §4-E4:
+
+1. **"rejects a `RunnableWithFallbacks` passed as `model`" no longer holds.**
+   `create_react_agent` now *accepts* it at construction and **silently discards the
+   fallback**: the primary's exception propagates, while the same runnable falls back
+   correctly when invoked on its own. The decision here is unchanged — the dynamic-model
+   callable is still what keeps the fallback live — but the failure it guards against went
+   from a loud construction error to a silent loss of redundancy.
+2. **The API is deprecated.** `langgraph.prebuilt.create_react_agent` warns
+   `LangGraphDeprecatedSinceV10` — removal announced for v2.0 — and `pyproject.toml` pins
+   `langgraph>=1.0` with **no upper bound**. The successor, `langchain.agents.create_agent`,
+   **rejects the dynamic-model callable** (`AttributeError: 'function' object has no
+   attribute 'bind_tools'`), so migration requires rethinking how the fallback is composed,
+   not swapping an import.
+3. **"covered by a build smoke check" is false.** No test calls `build_agent`. Measured:
+   deleting the fallback wiring entirely (`model = primary`), dropping the credential check,
+   or dropping the `fb != primary` check each leaves the suite at **346 passed**. The
+   mechanism this ADR exists to describe has no test at all.
+
+Follow-ups tracked as `R1-C7` in `sistema/APROFUNDAMENTOS_ROADMAP.md`: a smoke test that
+proves the fallback actually fires, and a version ceiling on `langgraph`.
+
 ---
 
 ## ADR-003 — Defense-in-depth guardrail for the text-to-SQL tool

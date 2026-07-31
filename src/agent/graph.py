@@ -1,12 +1,22 @@
 """The ReAct agent: a LangGraph loop over the guarded SQL tool.
 
 Wiring note (the dual-provider fallback): LangGraph's ``create_react_agent``
-auto-binds tools to a single chat model and won't accept a fallback runnable
-directly. So we bind the tools to *each* provider, combine them with
-``with_fallbacks``, and hand the result to the agent as a **dynamic model
+auto-binds tools to a single chat model, so a fallback runnable handed to it as
+``model`` does not survive. We bind the tools to *each* provider, combine them
+with ``with_fallbacks``, and hand the result to the agent as a **dynamic model
 callable** — a plain function ``(state, runtime) -> model``. LangGraph treats a
 callable as a pre-built model and skips its own binding, which lets the active
 fallback flow through every model call in the loop.
+
+Re-measured 2026-07-31 on langgraph 1.2.4 (ADR-004 was written against 1.0):
+passing the ``RunnableWithFallbacks`` directly is no longer *rejected* at build
+time — it constructs and then **silently drops the fallback**, so the primary's
+exception propagates while the configured backup is never called. The callable
+above is what keeps the fallback live; the failure mode this guards against just
+became quieter. Note also that ``langgraph.prebuilt.create_react_agent`` is
+deprecated since v1.0 (removal announced for v2.0) and that its successor,
+``langchain.agents.create_agent``, rejects the dynamic-model callable outright —
+migrating is not an import swap. See ADR-004.
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ Measured effect (5 golden questions, structured vs native): both tiny models go
 from ≤1/5 to **5/5** valid + routed + filled tool calls. `format` fixes the
 *structure*; SQL *correctness* still scales with model size — which is exactly the
 "shines with a better model" story, and why this is gated to the tiny tier only
-(strong models keep native tool-calling; see ``providers.resolve``).
+(strong models keep native tool-calling; see ``providers.should_constrain``).
 """
 
 from __future__ import annotations

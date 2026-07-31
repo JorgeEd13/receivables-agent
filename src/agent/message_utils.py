@@ -2,7 +2,12 @@
 
 Both the HTTP boundary (`src/api/app.py`) and the streaming plan-cache wrapper
 (`src/agent/cached_agent.py`) need the same two extractions — the final answer
-text and the distinct tool names — so they live here once.
+text and the distinct tool names — so they live here.
+
+Known duplication (found 2026-07-31): `evals/run.py` carries its own byte-identical
+`_final_text` / `_tools_used` instead of importing these. A fix here does not reach
+the eval runner, which means the evals can silently measure older behaviour than the
+API serves. Collapsing the copies is tracked as a follow-up.
 """
 
 from __future__ import annotations
