@@ -60,6 +60,21 @@ longer exists. Fixed by adding a "how to read the section headers" note to the m
 (the headers are a record of the break, the assertions are the present tense) plus a round-3
 closing note, and by moving the three false sentences to the past tense.
 
+**2026-07-30 — §1 of the adversarial suite was a section that proved nothing (tests, no behaviour
+change). 319 → 324 tests.** The same walk that produced the note above missed one header: §1
+still described the literal-masking desync as live, and its comments name `_mask_literals`, a
+function ADR-022 deleted. Measured: the three desync payloads are all refused by the *same*
+sentence, `Function(s) not in allow-list: duckdb_settings.` — the quoting construct contributes
+nothing, the payload does all the work, and with the payload stripped all three are accepted (and
+should be). Fixed three ways: a dated closing banner on the section; the refusal assertion now
+asserts the **reason** (`match=`), so a payload that rots into a parse error turns the section red
+instead of green — measured as a pair, rot with the reason asserted is 3 red, rot without it is
+324 green; and four new cases pin the property that was left standing, that an apostrophe inside
+`$a$…$a$`, `$tag$…$tag$`, `e'…'` or `"…"` reaches the engine unchanged. The two cases carrying
+content around the apostrophe are the ones that discriminate — a masker mutation leaves `''''`
+untouched, so a payload made only of the escaped character cannot tell mangling from fidelity.
+Three mutations of the new test code stay green; that is recorded in the section, not hidden.
+
 **2026-07-30 — `catalog_name` was never read (fixed, ADR-022 amendment).** A blind audit of
 `sql_guard.py` — two readers with the code and nothing else, no design notes — found that the
 tree walk read two of the three qualification fields. A three-part name puts the database in

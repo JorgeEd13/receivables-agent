@@ -138,29 +138,61 @@ def assert_blocked(con, sql: str, forbidden: str | None = None) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 1. Parser/executor disagreement: the guard checks a MASKED copy, DuckDB
-#    executes the ORIGINAL. Any construct DuckDB treats as a string but the
-#    masker does not (or vice versa) desynchronises quote parity and blanks the
+# 1. Parser/executor disagreement: the guard checked a MASKED copy, DuckDB
+#    executed the ORIGINAL. Any construct DuckDB treated as a string but the
+#    masker did not (or vice versa) desynchronised quote parity and blanked the
 #    rest of the statement out of every check.
+#
+#    CLOSED by the tree walk (ADR-022), and this banner is dated 2026-07-30
+#    because the block went on describing a live break for two rounds after the
+#    break was gone. There is no masked copy: `guard_query` validates the parse
+#    tree, and `_mask_literals` no longer exists in `sql_guard.py`. What the
+#    three payloads below actually do today, measured on DuckDB 1.5.3:
+#
+#    * all three are refused by the same sentence — `Function(s) not in
+#      allow-list: duckdb_settings.` The quoting construct is not what refuses
+#      them; the sub-select in the payload is, and it would be refused with no
+#      quoting trick at all. They are a regression floor for a dead attack, not
+#      a discriminating test, so the assertion below now names the layer that
+#      refuses. If that sentence ever changes, this section is testing something
+#      other than what it says it is.
+#    * strip the payload and all three are ACCEPTED — which is the correct
+#      answer, not a second finding. `$a$'$a$`, `"a'b"` and `e'\''` are ordinary
+#      DuckDB; refusing them would break guarantee 4. That acceptance is the one
+#      property still standing here, so it is pinned below instead of assumed.
+#
+#    The test name `test_literal_masking_cannot_be_desynchronised` is kept
+#    deliberately: like every round header in this file it names the break the
+#    payload was written against, not the mechanism in force today.
+#
+#    MEASURED AFTER THIS AMENDMENT (324 tests, was 319). The pair that justifies
+#    the `match=`: rot the three payloads into a parse error and, with the reason
+#    asserted, three tests go red — with a bare `pytest.raises(GuardrailError)`
+#    the same rot is 324 green, which is this section's original defect
+#    reappearing. Putting `duckdb_settings` on the function allow-list is 11 red.
+#    The masker mutation described above is 8 red. And the number that is not
+#    flattering, in the spirit of ROUND 6: three mutations applied to these
+#    tests instead of to the guard — dropping the `match=`, and reducing either
+#    acceptance assertion to `is not None` — are all three green.
 # --------------------------------------------------------------------------- #
 
 # `$a$'$a$` is a dollar-quoted string whose *content* is a single quote. DuckDB
-# reads one string constant; `_mask_literals` sees a bare `'`, opens a literal
-# that never closes, and masks the whole remainder of the query to `''`.
+# read one string constant; `_mask_literals` saw a bare `'`, opened a literal
+# that never closed, and masked the whole remainder of the query to `''`.
 DOLLAR_QUOTE_DESYNC = (
     "SELECT $a$'$a$ AS z, (SELECT count(*) FROM duckdb_settings()) AS leak "
     "FROM invoices"
 )
 
-# Same desync with no `$` anywhere: `_mask_literals` has no notion of
-# double-quoted identifiers, so an apostrophe inside one opens a literal.
+# Same desync with no `$` anywhere: `_mask_literals` had no notion of
+# double-quoted identifiers, so an apostrophe inside one opened a literal.
 DQUOTE_IDENT_DESYNC = (
     "SELECT 1 AS \"a'b\", (SELECT count(*) FROM duckdb_settings()) AS leak "
     "FROM invoices"
 )
 
 # Third desync source: DuckDB's `e'...'` escape strings honour backslash
-# escapes, the scanner does not, so `e'\''` shifts quote parity by one.
+# escapes, the scanner did not, so `e'\''` shifted quote parity by one.
 ESTRING_DESYNC = (
     "SELECT e'\\'' AS z, (SELECT count(*) FROM duckdb_settings()) AS leak "
     "FROM invoices"
@@ -173,9 +205,62 @@ ESTRING_DESYNC = (
     ids=["dollar_quoted_string", "double_quoted_identifier", "escape_string"],
 )
 def test_literal_masking_cannot_be_desynchronised(sql: str) -> None:
-    """The masked copy must not hide SQL that DuckDB will actually execute."""
-    with pytest.raises(GuardrailError):
+    """The masked copy must not hide SQL that DuckDB will actually execute.
+
+    The `match` is the point of the amended test: without it, this passes if
+    *any* layer says no — including a parse error on a payload that has rotted,
+    which is how a test keeps its green light after it stopped testing anything.
+    """
+    with pytest.raises(GuardrailError, match=r"not in allow-list: duckdb_settings"):
         guard_query(sql)
+
+
+# The same constructs with the payload removed. This is the half of the
+# statement the desync payloads never asserted: the guard must see *through* the
+# quoting, not around it. A masker coming back by any route — an optimisation, a
+# "sanitise before execute" step — blanks or mangles these, and they go red here
+# rather than silently changing what reaches the engine.
+#
+# The two cases carrying content *around* the apostrophe are the ones doing the
+# work, and that was measured, not assumed: a mutation that blanks string
+# literals with `re.sub(r"'[^']*'", "''", ...)` leaves `''''` — the printed form
+# of a lone apostrophe — untouched, so the first and third cases stay green
+# under it while `a'b` turns red. A payload whose whole content is the escaped
+# character cannot tell mangling from fidelity.
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT $a$'$a$ AS z FROM invoices", "'"),
+        ("SELECT $tag$a'b$tag$ AS z FROM invoices", "a'b"),
+        ("SELECT e'\\'' AS z FROM invoices", "'"),
+        ("SELECT e'a\\'b' AS z FROM invoices", "a'b"),
+    ],
+    ids=[
+        "dollar_quoted_string",
+        "dollar_quoted_with_tag",
+        "escape_string",
+        "escape_string_with_content",
+    ],
+)
+def test_quoting_constructs_reach_the_engine_unchanged(
+    con, sql: str, expected: str
+) -> None:
+    """An apostrophe inside a quoted construct must survive to execution.
+
+    The guard re-prints the statement from the validated tree (ADR-022), so
+    DuckDB's own printer chooses the quoting: `$a$'$a$` comes back as `''''`.
+    The assertion is on the *value*, not on the text, because the text is
+    allowed to change and the value is not.
+    """
+    assert {row[0] for row in run_guarded(con, sql)} == {expected}
+
+
+def test_quoted_identifier_alias_reaches_the_engine_unchanged(con) -> None:
+    """Same property for `"a'b"` — an apostrophe inside an identifier. Here the
+    survivor is the column name, so the assertion reads the cursor description
+    instead of the rows."""
+    cursor = con.execute(guard_query('SELECT 1 AS "a\'b" FROM invoices'))
+    assert [column[0] for column in cursor.description] == ["a'b"]
 
 
 def test_desync_does_not_reach_duckdb_catalog(con) -> None:
