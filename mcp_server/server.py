@@ -30,7 +30,7 @@ from mcp.server.fastmcp import FastMCP
 
 from src.agent.ledger import connect_readonly, run_query
 from src.agent.schema_hints import SCHEMA_HINTS
-from src.agent.sql_guard import GuardrailError, guard_query
+from src.agent.sql_guard import GuardrailError, guard_query, strip_wrapper_line_echo
 from src.core.config import Settings, get_settings
 
 
@@ -61,7 +61,11 @@ def run_guarded_query(
     try:
         columns, rows = run_query(con, guarded)
     except duckdb.Error as exc:
-        return json.dumps({"error": "sql_error", "detail": str(exc)})
+        # Same contract as the in-app tool: an MCP client self-correcting from
+        # this message must not be handed line numbers into the guard's wrapper.
+        return json.dumps(
+            {"error": "sql_error", "detail": strip_wrapper_line_echo(str(exc))}
+        )
 
     records = [{col: _jsonify(val) for col, val in zip(columns, row, strict=False)} for row in rows]
     return json.dumps(

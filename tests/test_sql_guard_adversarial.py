@@ -1368,10 +1368,14 @@ def test_r5_a_refusal_never_quotes_the_wrapper_back() -> None:
     a line of the wrapper. Refusals that quote the *caller's* own text are fine
     and still happen: the model already has that text and can fix it.
 
-    NOTE the limit of this test: it covers the guard's refusals only. An error
-    raised while *executing* the guarded query still reaches the model with the
-    wrapper's line numbering, through `tools.py` and `mcp_server/server.py`.
-    That path is not this module's and is tracked separately.
+    NOTE the limit of this test: it covers the guard's refusals only. Errors
+    raised while *executing* the guarded query used to reach the model with the
+    wrapper's line numbering, through `tools.py` and `mcp_server/server.py` —
+    the same defect on the other side of the guard, left open when this test was
+    written. That was closed on 2026-07-31 by `strip_wrapper_line_echo`, and it
+    is pinned where it belongs: ROUND 7 of `test_sql_guard.py` for the strip
+    itself, `test_tool_error_contract.py` for the two call sites. This test's
+    scope did not change.
     """
     refusals = [
         "SELECT 1) AS x; DROP TABLE customers; SELECT * FROM (SELECT 1",

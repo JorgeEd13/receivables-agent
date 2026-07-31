@@ -1,24 +1,29 @@
-"""Guardrail tests — the priority suite. Pure, offline, no LLM, no data.
+"""Guardrail tests — the priority suite. Pure, offline, no LLM, no ledger.
 
 The guard parses through DuckDB itself (ADR-022), so these do touch the DuckDB
-library — but only its parser, on an empty in-memory connection. No ledger, no
-network, no model.
+library — its parser for the guard proper, and (in the last section) its binder,
+on a throwaway in-memory table. No ledger file, no network, no model.
 
 Covers the two failure modes that matter for a text-to-SQL agent:
   1. injection / escape attempts must be *rejected*;
   2. legitimate analytical queries must *pass* (no over-blocking).
+
+...and, since ROUND 7, a third that is neither: what a *failed execution* is
+allowed to tell the model about the guard's own wrapper.
 """
 
 from __future__ import annotations
 
 import re
 
+import duckdb
 import pytest
 
 from src.agent.sql_guard import (
     DEFAULT_MAX_ROWS,
     GuardrailError,
     guard_query,
+    strip_wrapper_line_echo,
 )
 
 # --------------------------------------------------------------------------- #
@@ -161,3 +166,162 @@ def test_error_message_names_the_violation() -> None:
         guard_query("SELECT * FROM secret_table")
     with pytest.raises(GuardrailError, match=r"(?i)single statement"):
         guard_query("SELECT 1; SELECT 2")
+
+
+# --------------------------------------------------------------------------- #
+# ROUND 7 — what an EXECUTION failure may say about the wrapper.
+#
+# The refusals above never quote the wrapper back at the caller: R1-C2 replaced
+# the hand-repaired text with the parser's own print, and the last check's
+# failure message speaks in the guard's words instead of DuckDB's. That rule
+# stopped at the guard's edge. A query that PASSED the guard and then failed in
+# the binder came back through `tools.py` / `mcp_server/server.py` carrying
+#
+#     LINE 2: SELECT amont FROM invoices
+#                    ^
+#
+# `LINE 2` is the wrapper's numbering and the echoed text is DuckDB's print of
+# the validated tree, so a model reading this to fix itself was handed a
+# coordinate into a string it never wrote. Not a confidentiality problem — this
+# repo is public and the wrapper is spelled out in `sql_guard.py`'s docstring.
+# It is a self-correction problem, and it was found by R1-C2 while measuring the
+# refusal path, not by the tests.
+#
+# What these pin: the echo goes, the diagnosis stays. The second half is the
+# half that can rot silently — a strip that eats `Candidate bindings` passes any
+# test that only asserts `"LINE" not in message`.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def binder_con():
+    """A table the guard allows, with columns to get wrong. No ledger needed.
+
+    Deliberately a real DuckDB binder rather than hand-written message strings:
+    the format of that echo is DuckDB's, not ours, and a fixture that spells it
+    out by hand would keep passing after an upgrade changed it.
+
+    The column types mirror `data/generate.py`'s `invoices` exactly. That is not
+    decoration — the first version of this fixture typed `amount` as DECIMAL,
+    and `WHERE amount > 'x'` then bound cleanly instead of raising the
+    Conversion Error it raises against the real ledger, where `amount` is
+    DOUBLE. A fixture one type away from production silently drops a case.
+    """
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE invoices ("
+        "invoice_id BIGINT, customer_id INTEGER, issue_date DATE, due_date DATE, "
+        "amount DOUBLE, currency VARCHAR, status VARCHAR)"
+    )
+    # And it has to hold a row. An empty table made `WHERE amount > 'x'` succeed:
+    # that cast fails while *evaluating*, and with nothing to evaluate the query
+    # returned an empty result instead of the Conversion Error. Two different
+    # ways for an under-built fixture to lose the same case.
+    con.execute(
+        "INSERT INTO invoices VALUES "
+        "(1, 7, DATE '2026-01-05', DATE '2026-02-04', 1250.00, 'BRL', 'overdue')"
+    )
+    yield con
+    con.close()
+
+
+def _failing_detail(con, sql: str) -> str:
+    """Run a guarded query expected to fail in the binder; return what the model sees."""
+    with pytest.raises(duckdb.Error) as exc:
+        con.execute(guard_query(sql, max_rows=50))
+    return strip_wrapper_line_echo(str(exc.value))
+
+
+ECHO_LINE = re.compile(r"^LINE \d+: ", re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    "sql,keep",
+    [
+        ("SELECT amont FROM invoices", "Candidate bindings"),
+        ("SELECT sum(status) FROM invoices", "Candidate functions"),
+        ("SELECT CAST('abc' AS INTEGER)", "Conversion Error"),
+        ("SELECT amount FROM invoices WHERE amount > 'x'", "Conversion Error"),
+        # A string literal containing a real newline pushes the failure onto the
+        # wrapper's LINE 3 — the number is not a constant, which is why the code
+        # matches `LINE \d+` and not the `LINE 2` that every example shows.
+        ("SELECT 'a\nb' AS x, amont FROM invoices", "Candidate bindings"),
+    ],
+)
+def test_execution_error_keeps_the_diagnosis_and_drops_the_echo(binder_con, sql, keep) -> None:
+    detail = _failing_detail(binder_con, sql)
+    assert not ECHO_LINE.search(detail), detail
+    assert "_guarded" not in detail, detail
+    # The half that matters: the model must still be told what is actually wrong.
+    assert keep in detail, detail
+    assert detail.startswith(("Binder Error", "Conversion Error")), detail
+
+
+def test_a_forged_echo_cannot_cost_the_model_its_diagnosis(binder_con) -> None:
+    """A quoted identifier may contain a newline, so the caller can write a line
+    that looks exactly like DuckDB's echo INTO the diagnosis:
+
+        SELECT "a\\nLINE 9: injected" FROM invoices
+          ->  Binder Error: Referenced column "a
+              LINE 9: injected" not found in FROM clause!
+              Candidate bindings: "invoice_id"
+
+              LINE 2: SELECT "a
+                             ^
+
+    Cutting at the first `LINE n:` would take `Candidate bindings` with it —
+    the caller would be able to blank its own error message. The cut is the
+    last one, and only inside the final two lines.
+    """
+    detail = _failing_detail(binder_con, 'SELECT "a\nLINE 9: injected" FROM invoices')
+    assert "Candidate bindings" in detail, detail
+    assert "LINE 9: injected" in detail, detail  # kept: it is data, not an echo
+    assert "LINE 2:" not in detail, detail  # dropped: it is the wrapper's
+
+
+def test_an_error_without_an_echo_is_untouched(binder_con) -> None:
+    """Six of the twenty failures measured carry no echo at all. Passing those
+    through unchanged is the branch that stops the strip from being a rewriter.
+    """
+    with pytest.raises(duckdb.Error) as exc:
+        binder_con.execute(guard_query("SELECT count(*) FROM invoices GROUP BY 9", max_rows=50))
+    raw = str(exc.value)
+    assert not ECHO_LINE.search(raw)  # the premise of this test, not an assumption
+    assert strip_wrapper_line_echo(raw) == raw
+
+
+def test_an_echo_head_without_its_caret_is_not_an_echo() -> None:
+    """The reason the strip needs BOTH lines, written as a test because the
+    first version of it needed only the head and this case caught it.
+
+    A caller who lands an echo-shaped line at the second-to-last position would
+    otherwise truncate the message there — deleting its own diagnosis on
+    purpose, or the next reader's by accident. Requiring the caret underneath
+    closes it: DuckDB's caret line is bare, and injected text is followed by the
+    rest of DuckDB's sentence.
+    """
+    forged = (
+        'Binder Error: Referenced column "x\n'
+        'LINE 4: y" not found!\n'
+        'Candidate bindings: "amount"'
+    )
+    assert strip_wrapper_line_echo(forged) == forged
+
+
+def test_the_shape_recognised_is_duckdbs_and_not_merely_echo_ish() -> None:
+    """Both halves of the pattern are pinned to what DuckDB actually emits,
+    because loosening either one passes every other test in this file.
+
+    Measured: widening the caret to `^ *\\^.*$`, or the head to `^LINE `, leaves
+    all 335 green. A strip that fires on anything echo-shaped is a strip whose
+    real boundary nobody knows — and this one runs on text a caller can steer.
+    """
+    tail = "Binder Error: something went wrong\nCandidate bindings: \"amount\"\n{head}\n{caret}"
+    # A caret line is bare. DuckDB puts nothing after it.
+    assert strip_wrapper_line_echo(
+        tail.format(head="LINE 2: SELECT amont FROM invoices", caret='       ^" not found!')
+    ) == tail.format(head="LINE 2: SELECT amont FROM invoices", caret='       ^" not found!')
+    # A head carries a line NUMBER and a colon.
+    assert strip_wrapper_line_echo(
+        tail.format(head="LINE up next: whatever", caret="       ^")
+    ) == tail.format(head="LINE up next: whatever", caret="       ^")

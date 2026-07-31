@@ -155,14 +155,43 @@ them end-to-end ones that execute the result. The property was held by accident,
 statement. And of seven mutations applied to the **tests** instead of the guard, **six stay
 green**: nothing covers a test file, which is why the mutations get run.
 
-> ⚠️ **OPEN — the same leak through the execution path.** An error raised while *executing* the
-> guarded query still returns the wrapper's line numbering to the model, via `tools.py` and
-> `mcp_server/server.py`: `Binder Error: … LINE 2: SELECT count_star() FROM customers GROUP BY
-> missing`. Severity is product quality, not confidentiality — this repo is public, so the
-> wrapper's shape is not a secret; the cost is that a model trying to self-correct is handed a
-> line number into a query it did not compose. Fixing it means stripping the `LINE n:` echo while
-> keeping the binder's message (which the model *does* need, e.g. "Candidate bindings"), in two
-> files that belong to the agent-tools layer rather than the guard.
+> ✅ **CLOSED 2026-07-31 — the same leak through the execution path.** An error raised while
+> *executing* the guarded query returned the wrapper's line numbering to the model, via
+> `tools.py` and `mcp_server/server.py`: `Binder Error: … LINE 2: SELECT count_star() FROM
+> customers GROUP BY missing`. Severity was product quality, not confidentiality — this repo is
+> public, so the wrapper's shape is not a secret; the cost was that a model trying to
+> self-correct is handed a line number into a query it did not compose.
+
+**2026-07-31 — the execution path stopped quoting the wrapper (ADR-022 amendment). 324 → 336
+tests.** `strip_wrapper_line_echo` drops DuckDB's source echo and its caret from execution
+errors; both tool surfaces call it. The diagnosis is kept whole, `Candidate bindings` included —
+a message stripped of its reason costs the model more than a wrong line number does.
+
+Three things measurement changed about the obvious implementation. **The line number is not a
+constant:** a string literal containing a real newline moves the failure to `LINE 3`, so a strip
+pinned to `LINE 2` leaks on exactly the queries hardest to read. **The echo can be forged from
+inside the query:** a quoted identifier may carry a newline, so `SELECT "a\nLINE 9: injected"
+FROM invoices` plants an echo-shaped line *above* the genuine one, inside `Referenced column …` —
+cutting at the first match would delete the Candidate bindings below it, handing the caller a way
+to blank its own diagnosis. The cut is anchored at the tail and requires the caret line under it.
+**Rewriting the number instead of dropping it is worse:** the echoed text is DuckDB's print of the
+validated tree (`amount_due::INTEGER` → `CAST(amount_due AS INTEGER)`), so a caret shown against
+the caller's own text would point at the wrong character.
+
+Sweep of 20 failing queries on DuckDB 1.5.3: **14** carry the echo, in all 14 it is the last two
+lines; the other 6 pass through untouched. Unrecognised shapes are returned unchanged on
+purpose — a future DuckDB brings the leak back rather than eating the diagnosis, and the tests
+that drive real queries into the binder go red on that upgrade.
+
+**Mutation: 10 of 10 red** — either call site back to `str(exc)` 1 each · strip as a no-op 8 ·
+caret requirement dropped 2 · cut at the first match 3 · `LINE 2` hardcoded 1 · over-cut to the
+first line 6 · and the two **relaxations**, which is where the round earned its keep: widening
+the caret to `^ *\^.*$` and the head to `^LINE ` both left all 335 green until a test was written
+for the shape itself, 1 each. **The fixture was the other lesson:** typed with `DECIMAL` instead
+of the ledger's `DOUBLE`, and later left with zero rows, it made `WHERE amount > 'x'` *succeed*
+and silently dropped the case — a fixture one type or one row from production is a different
+test, not a smaller one. On the tests instead of the code, **6 of 6** assertion-gutting mutations
+stay green.
 
 > ⚠️ **OPEN — availability.** The guard bounds what can be READ, not how much WORK a query
 > may do. `WITH RECURSIVE invoices(n) AS (… n < 100000000) …`, `repeat('a', 1000000000)` and a

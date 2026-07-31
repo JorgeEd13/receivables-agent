@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from src.agent.ledger import run_query
 from src.agent.schema_hints import SCHEMA_HINTS
-from src.agent.sql_guard import GuardrailError, guard_query
+from src.agent.sql_guard import GuardrailError, guard_query, strip_wrapper_line_echo
 
 # A tool wrapper (see ``src.agent.turn_control.ToolCallTracker.wrap``): decorates a
 # tool's callable to dedup repeats + record the turn's calls. ``None`` = unwrapped.
@@ -71,7 +71,11 @@ def make_query_ledger_tool(
         try:
             columns, rows = run_query(con, guarded)
         except duckdb.Error as exc:
-            return json.dumps({"error": "sql_error", "detail": str(exc)})
+            # The model is about to read this and try again, so it must not
+            # contain line numbers into the guard's wrapper — text it never
+            # wrote. The diagnosis itself is passed through untouched.
+            detail = strip_wrapper_line_echo(str(exc))
+            return json.dumps({"error": "sql_error", "detail": detail})
 
         records = [
             {col: _jsonify(val) for col, val in zip(columns, row, strict=False)} for row in rows

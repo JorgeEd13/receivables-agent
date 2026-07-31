@@ -244,7 +244,9 @@ loops, dropping the reason a refusal must give, comparing a tree to `is not None
 — **six stay green**. Nothing covers a test file. What holds it is that these
 mutations were run at all.
 
-**Not fixed here, and named rather than left quiet.** An error raised while
+**Not fixed here, and named rather than left quiet.** *(Closed 2026-07-31 — see
+the amendment below. Kept as written because it is the record of a defect that
+was known and carried for a release.)* An error raised while
 *executing* the guarded query still reaches the model with the wrapper's line
 numbering, through `tools.py` and `mcp_server/server.py`:
 
@@ -257,6 +259,53 @@ Same class, different layer, and its severity is product quality rather than
 confidentiality — this repo is public, so the wrapper's shape is not a secret
 from anyone; the cost is that a model trying to self-correct is handed a line
 number into a query it did not compose.
+
+**Amendment (2026-07-31) — the execution path no longer quotes the wrapper
+either.** The paragraph above is discharged. `strip_wrapper_line_echo` removes
+DuckDB's source echo from execution errors, and both tool surfaces call it before
+returning the failure. What goes is the echo and its caret; what stays is the
+diagnosis, `Candidate bindings` included — that half is the point, since a
+message stripped of its reason costs the model more than a wrong line number
+does.
+
+Three things the implementation had to be measured into, none of them visible
+from the bug report:
+
+- **The line number is not a constant.** Every example shows `LINE 2`, and a
+  string literal containing a real newline moves the failure to `LINE 3`. Pinned
+  to `LINE 2`, the strip leaks on exactly the queries that are hardest to read.
+- **The echo can be forged from inside the query.** A quoted identifier may carry
+  a newline, so `SELECT "a\nLINE 9: injected" FROM invoices` puts an echo-shaped
+  line *above* the genuine one, inside `Referenced column …`. Cutting at the
+  first match would delete the Candidate bindings below it — a caller able to
+  blank its own diagnosis. The cut is anchored at the tail and requires the caret
+  line under it, which forged text cannot supply.
+- **Rewriting the number instead of dropping it is worse.** The echoed line is
+  DuckDB's print of the validated tree, so `amount_due::INTEGER` comes back as
+  `CAST(amount_due AS INTEGER)`; a caret computed for that text and shown against
+  the caller's own would point at the wrong character. A wrong caret costs more
+  than no caret.
+
+Measured on DuckDB 1.5.3 over a 20-query sweep: 14 failures carry the echo, and
+in all 14 it is the last two lines; the other 6 (`GROUP BY 9`, `amount.foo`,
+`date_trunc('bogus', …)`, …) are returned untouched. The failure direction is
+deliberate — an unrecognised shape returns the message unchanged, so a future
+DuckDB brings the leak back rather than eating the diagnosis, and the tests that
+run real queries into the binder go red on that upgrade.
+
+Suite **324 → 336**. Mutation, **10 of 10 red**: either call site back to
+`str(exc)` **1** each · strip as a no-op **8** · dropping the caret requirement
+**2** · cutting at the first match **3** · hardcoding `LINE 2` **1** · over-
+cutting to the first line **6** · and the two *relaxations*, which is where this
+round earned its keep — widening the caret to `^ *\^.*$` and the head to `^LINE `
+both left all 335 green until a test was written for the shape itself, **1**
+each. Two more results worth the space: an `invoices` fixture typed with
+`DECIMAL` instead of the ledger's `DOUBLE`, and the same fixture left empty,
+each silently dropped the `WHERE amount > 'x'` case by making it *succeed* —
+a fixture one type or one row away from production is not a smaller test, it is
+a different one. And the same exercise on the tests instead of the code: **6 of
+6** assertion-gutting mutations stay green, unchanged from the 6-of-7 recorded
+above. Nothing covers a test file except running the mutations.
 
 **Consequences.**
 

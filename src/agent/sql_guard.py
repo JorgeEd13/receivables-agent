@@ -63,6 +63,12 @@ rather than executed, so a printer bug in some future DuckDB release costs a
 query instead of becoming a difference between what was checked and what runs.
 The caller's text now reaches nothing but the parser.
 
+That rule covers what the guard *refuses*. What it executes can still fail in
+the binder, and DuckDB then quotes the wrapper's own line numbering back at
+whoever asked — so the same rule is applied on the way out, by
+``strip_wrapper_line_echo`` at the bottom of this module. Both tool surfaces
+call it before handing a failure to the model.
+
 What each layer actually protects. ``read_only=True`` protects *integrity*; it
 stops writes. It does **not** protect *confidentiality*: a read that reaches
 outside the ledger is still a read, and reading is what an LLM-composed query
@@ -74,6 +80,7 @@ depth" while the confidentiality half was a single layer.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from typing import Any
 
@@ -583,3 +590,78 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
             "The validated query could not be wrapped as a single statement."
         ) from exc
     return guarded
+
+
+# DuckDB's source echo is two lines and always the last two: the quoted source
+# line, then a caret pointing into it. Both are required before anything is cut
+# — matching the `LINE n:` head alone is not enough, because that head can be
+# forged from inside the query (see the docstring below). Measured on DuckDB
+# 1.5.3 across the 14 echoing failures of a 20-query sweep: the caret line is
+# spaces-then-caret in every one, with nothing after it.
+_SOURCE_ECHO_HEAD = re.compile(r"^LINE \d+: ")
+_SOURCE_ECHO_CARET = re.compile(r"^ *\^$")
+
+
+def strip_wrapper_line_echo(message: str) -> str:
+    """Remove the ``LINE n:`` source echo from a DuckDB *execution* error.
+
+    The refusals raised above never quote the wrapper back at the caller, for
+    the reason given at the wrap site: the caller is a language model trying to
+    self-correct, and a line number into a query it did not compose is feedback
+    it cannot act on. Errors raised while *executing* the guarded query used to
+    escape that rule — ``guard_query`` returns the statement inside
+    ``SELECT * FROM (\\n … \\n) AS _guarded LIMIT n``, so DuckDB reports a
+    binder failure at ``LINE 2`` and echoes the line, which is the printed
+    canonical text rather than anything the model typed::
+
+        Binder Error: Referenced column "amont" not found in FROM clause!
+        Candidate bindings: "amount", "status", "customer_id"
+
+        LINE 2: SELECT amont FROM invoices
+                       ^
+
+    Only the echo goes. The diagnosis above it — including *Candidate
+    bindings*, the part a model actually corrects itself with — is kept
+    verbatim. Rewriting the number to be relative to the caller's text was the
+    obvious alternative and is worse: the echoed line is DuckDB's print of the
+    validated tree, so ``amount_due::INTEGER`` comes back as
+    ``CAST(amount_due AS INTEGER)`` and the caret would point into a string the
+    caller never had. A wrong caret is more expensive than no caret.
+
+    Measured on DuckDB 1.5.3 over 20 failing queries: 14 carry the echo and in
+    every one of them it is the **last two lines** — echo, then caret. The six
+    without it (``GROUP BY 9``, ``amount.foo``, ``date_trunc('bogus', …)``, …)
+    are returned unchanged. The line number is not a constant either: a string
+    literal containing a real newline pushes the failure to ``LINE 3``, which is
+    why the pattern reads ``LINE \\d+`` and not the ``LINE 2`` every example
+    shows.
+
+    Both lines of the block are required, and that is not belt-and-braces. A
+    quoted identifier can carry a newline, so the caller can put a line that
+    reads exactly like an echo *into the diagnosis itself*::
+
+        SELECT "a\\nLINE 9: injected" FROM invoices
+
+    lands as ``Referenced column "a`` / ``LINE 9: injected" not found …`` — an
+    echo-shaped line sitting above the genuine one. Cutting at the first
+    ``LINE n:`` would delete the Candidate bindings this function exists to
+    preserve, which hands the caller a way to blank its own error message. So
+    the cut is anchored at the tail and needs the caret line under it; a forged
+    head cannot supply one, because whatever the caller injects is followed by
+    the rest of DuckDB's sentence rather than by a bare ``^``.
+
+    The failure direction is deliberate: if a future DuckDB emits the echo in
+    some other shape, this returns the message untouched and the leak comes
+    back rather than the diagnosis being eaten. That is the cheaper of the two
+    mistakes, and the ROUND 7 tests fail on the upgrade that causes it — they
+    run real queries into the binder instead of asserting against hand-written
+    message strings.
+    """
+    lines = message.splitlines()
+    if len(lines) < 2:
+        return message
+    if not _SOURCE_ECHO_CARET.match(lines[-1]):
+        return message
+    if not _SOURCE_ECHO_HEAD.match(lines[-2]):
+        return message
+    return "\n".join(lines[:-2]).rstrip()
