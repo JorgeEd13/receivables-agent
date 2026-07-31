@@ -797,6 +797,12 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
   `python -m evals.run` (with a provider) for the accuracy/pass-rate figure, and
   note one response latency. Then add the GIF + a small "evals" and "latency"
   line to the README — all real, none guessed.
+- **Cleanup, low priority (queued 2026-07-31):** `evals/run.py` L23–42 carries a
+  third byte-identical copy of `final_text` / `tools_used` (canonical versions
+  live in `src/agent/message_utils.py`). Import the shared helpers and delete
+  the copies — while the duplication lasts, the evals can silently measure stale
+  behavior if the canonical helpers change. Bonus while there: make `final_text`
+  filter content blocks by `type == "text"`.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
