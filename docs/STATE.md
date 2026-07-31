@@ -524,7 +524,8 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > 3. Hit `POST /api/chat` once (or watch the demo run) → note **one response latency**.
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
-> **2026-07-31 — OPEN: the dual-provider fallback has no test, and ADR-004's premise expired.**
+> **2026-07-31 — items 1–2 CLOSED (see the addendum below); 3–5 still OPEN. The dual-provider
+> fallback has no test, and ADR-004's premise expired.**
 > A line-by-line audit of `graph/tools/providers/schema_hints/message_utils/constrained` ran **28
 > mutations against the suite; 19 stayed green**. Nothing was fixed in code this session — three
 > false comments were corrected and ADR-004 got a dated amendment. What is open:
@@ -548,6 +549,22 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 >
 > Tracked as `R1-C7`–`R1-C10`. Full walkthrough + reproducible snippets in the private study doc
 > (`repo-base-career/aprofundamentos/receivables-agent/R1-T3…md`), not in this repo.
+>
+> **Addendum 2026-07-31 (`R1-C7`) — items 1 and 2 closed, and item 2 was wrong.**
+> `tests/test_provider_fallback.py` now covers the wiring offline (**346 → 359**): the backup
+> answers when the primary raises, the order is config-driven, and nothing is wired for a keyless
+> provider, a fallback equal to the primary, or none at all. **7 of 7 mutations of
+> `build_dynamic_model` now fail**, including the two *relaxing* ones that the audit above measured
+> at 346 green. `langgraph` is capped `<2` in `pyproject.toml` and `requirements.txt`.
+> **Item 2 above is false and stays as written for the record:** the direct pass does *not*
+> silently drop the fallback. `RunnableWithFallbacks.__getattr__` broadcasts `bind_tools` to the
+> fallbacks whenever the wrapped model annotates it as returning a `Runnable` — which `ChatOllama`,
+> `ChatGoogleGenerativeAI` and our `ConstrainedToolModel` all do. The audit's fake declared no
+> return type, so it measured the unannotated branch and reported it as the library's behaviour;
+> writing the test is what caught it. The callable stays because it is independent of that
+> annotation, and migrating to `langchain.agents.create_agent` means **deleting** it (that API
+> takes the wrapped runnable directly, fallback intact) rather than redesigning the fallback.
+> Full correction in **ADR-004 Amendment 2**.
 
 ## Done
 - 2026-07-02: **Phase 6 Layer 2 — grammar-constrained tool-calls (ADR-011).**

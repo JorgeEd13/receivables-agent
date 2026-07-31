@@ -1039,7 +1039,11 @@ wired only when it has credentials, so an Ollama-only box still builds.
 - The callable signature is coupled to a LangGraph internal contract; pinned via
   `langgraph>=1.0` and covered by a build smoke check.
 
-### Amendment · 2026-07-31 — the premise changed, and the last bullet above was wrong
+### Amendment 1 · 2026-07-31 — the premise changed, and the last bullet above was wrong
+
+> ⚠️ **Point 1 below was itself wrong — see Amendment 2.** It is kept as written
+> because how it went wrong is the useful part. Points 2 and 3 stand, with point 3
+> reaching the wrong conclusion about what migration costs.
 
 Re-measured against the installed **langgraph 1.2.4 / langchain-core 1.4.0** (this ADR
 was written against 1.0). Three corrections, all reproducible with the snippet in
@@ -1064,6 +1068,50 @@ was written against 1.0). Three corrections, all reproducible with the snippet i
 
 Follow-ups tracked as `R1-C7` in `sistema/APROFUNDAMENTOS_ROADMAP.md`: a smoke test that
 proves the fallback actually fires, and a version ceiling on `langgraph`.
+
+### Amendment 2 · 2026-07-31 — writing the test falsified Amendment 1
+
+Amendment 1 claimed the direct pass *silently discards* the fallback. It does not. That
+measurement was an artefact of the test double used to take it, and writing the missing
+test is what exposed it — the same experiment against a differently-shaped fake produced
+the opposite result.
+
+**What actually happens.** `create_react_agent` sees something that is not a
+`RunnableBinding`, so it calls `.bind_tools(tools)` on it (`_should_bind_tools`).
+`RunnableWithFallbacks` has no such method, so `__getattr__` runs, and it decides what to
+do by reading the **return type annotation** of the wrapped model's `bind_tools`
+(`_returns_runnable`):
+
+- annotated as returning a `Runnable` → the call is **broadcast** to the primary *and*
+  every fallback, and the wrapper survives with the fallback live;
+- not annotated → the primary's bound method is returned alone and **the backup is
+  dropped in silence**.
+
+Amendment 1's fake declared no return type; it measured the second branch and reported it
+as the library's behaviour. Measured here: `ChatOllama`, `ChatGoogleGenerativeAI` and this
+repo's own `ConstrainedToolModel` all declare a `Runnable` return, so on the real code path
+the direct pass **keeps the fallback**. Two fakes differing only in that annotation take
+opposite branches — pinned by `test_the_direct_pass_survives_only_by_a_return_annotation`.
+
+**What this changes:**
+
+1. **The decision stands, for a new reason.** The callable is no longer a workaround for a
+   rejection; it is what makes the fallback independent of a type-hint heuristic in
+   `langchain_core.runnables.fallbacks`. That is a thin thing to bet a production backup on.
+2. **Migration is cheaper than Amendment 1 said, not dearer.** `langchain.agents.create_agent`
+   rejects the callable *and accepts the wrapped runnable directly, fallback intact* (measured
+   on langchain 1.3.4). Porting means **deleting** the callable, not redesigning the fallback.
+3. **The gap Amendment 1 found is closed.** `tests/test_provider_fallback.py` covers the
+   wiring offline: the backup answers when the primary raises, the order is config-driven,
+   and no fallback is wired for a keyless provider, for a fallback equal to the primary, or
+   for none at all. Measured: **7 of 7 mutations of `build_dynamic_model` now fail**, the two
+   *relaxing* ones included (dropping `has_credentials` = 1 red; dropping `fb != primary` =
+   1 red), where all three left the suite fully green before. Suite **346 → 359**.
+4. **`langgraph` is capped at `<2`** in `pyproject.toml` and `requirements.txt`, so the
+   announced removal of `create_react_agent` arrives as a deliberate upgrade.
+
+**Standing caveat:** the annotation guard for the two cloud/local providers is skipped where
+their extras are absent, which includes CI (`[dev,mcp]`). It guards a dev box, not the pipeline.
 
 ---
 

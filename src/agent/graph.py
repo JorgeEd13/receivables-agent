@@ -9,14 +9,17 @@ callable as a pre-built model and skips its own binding, which lets the active
 fallback flow through every model call in the loop.
 
 Re-measured 2026-07-31 on langgraph 1.2.4 (ADR-004 was written against 1.0):
-passing the ``RunnableWithFallbacks`` directly is no longer *rejected* at build
-time — it constructs and then **silently drops the fallback**, so the primary's
-exception propagates while the configured backup is never called. The callable
-above is what keeps the fallback live; the failure mode this guards against just
-became quieter. Note also that ``langgraph.prebuilt.create_react_agent`` is
-deprecated since v1.0 (removal announced for v2.0) and that its successor,
-``langchain.agents.create_agent``, rejects the dynamic-model callable outright —
-migrating is not an import swap. See ADR-004.
+the direct pass is no longer rejected at build time. It now *works* — but only
+because ``RunnableWithFallbacks.__getattr__`` broadcasts ``bind_tools`` to the
+fallbacks when the wrapped model annotates it as returning a ``Runnable``, which
+every provider here happens to do. A model that omits that return annotation
+gets its fallback dropped in silence. The callable above does not depend on the
+annotation, which is why it stays. Note also that
+``langgraph.prebuilt.create_react_agent`` is deprecated since v1.0 (removal
+announced for v2.0); its successor ``langchain.agents.create_agent`` **rejects**
+this callable and takes the wrapped runnable instead, so migrating means
+deleting this indirection, not porting it. Pinned ``langgraph<2``; the contract
+is held down by ``tests/test_provider_fallback.py``. See ADR-004.
 """
 
 from __future__ import annotations

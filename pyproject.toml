@@ -15,7 +15,10 @@ authors = [{ name = "Jorge Ribeiro" }]
 # Phase 5: mcp (AI-native layer; optional extra below)  ✅
 dependencies = [
     "duckdb>=1.1",
-    "langgraph>=1.0",
+    # Upper bound is deliberate: `langgraph.prebuilt.create_react_agent` is
+    # deprecated since v1.0 with removal announced for v2.0, and the agent is
+    # built on it (ADR-004). v2 must be a decision, not a resolver surprise.
+    "langgraph>=1.0,<2",
     "langchain-core>=0.3",
     "pydantic>=2",
     "pydantic-settings>=2",
