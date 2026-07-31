@@ -627,6 +627,9 @@ ledger's views, and weakening that assertion is the only measured way to drop a 
 tiny-model prompt unnoticed. And the curated plans of ADR-009/ADR-012 are still not executed
 against a real ledger anywhere: `guard_query` checks relation names, never columns.
 
+> Closed later the same day — see **ADR-009 Amendment 2026-07-31 (`R1-C11`)**. The sentence
+> above is kept as written: it is the record of how the gap was found.
+
 ---
 
 ## ADR-012 — Self-contained tiny-Ollama Hugging Face Space (`Dockerfile.hf`)
@@ -895,6 +898,44 @@ the semantic-cache literature).
 - Layers 2–3 of Phase 6 (a hardened tiny local LLM with grammar-constrained
   tool-calls + a self-contained `Dockerfile.hf` / `space-deploy` branch) build on
   this and are deferred to a live-network session.
+
+### Amendment 2026-07-31 (`R1-C11`) — "re-validated through the guard" was never a check that the SQL runs
+
+Point 2 above is accurate and was read as more than it says. The guard is a **security**
+boundary: it decides whether a statement is read-only and whether it touches an allow-listed
+relation. It never looks at a column. `guard_query("SELECT no_such_column FROM v_customer_ar")`
+returns a wrapped query, happily — measured.
+
+For a model-warmed plan that is fine, because the SQL was written against a ledger that existed
+and a `ReplayError` falls through to the LLM. For the **curated** plans of ADR-012 it is not:
+that SQL is hand-authored, baked into the image, and wired to the UI's one-click chips, and its
+only check was the guard plus a JSON-shape assertion. Measured before the fix: renaming
+`v_customer_ar.overdue_amount` in `data/generate.py` left **every plan-cache test green** — while
+three of the twelve curated plans became a `Binder Error` at replay, so three chips on the live
+demo silently degrade to the tiny model on a free CPU, which is the exact failure the curated
+cache exists to prevent. Only the two schema-hint tests of ADR-013's amendment went red, and they
+say nothing about the plans.
+
+`tests/test_plan_cache.py` now replays **every curated plan through `replay_plan`** — the same
+function a cache hit runs — against a ledger built by `data/generate.py` through its own entry
+point (the `ledger` fixture moved to `tests/conftest.py`, one owner for the two suites that need
+it). Three properties, deliberately separate: the plan replays and reports the tools it declares;
+every ledger query still comes back with **rows**; and each curated policy query still targets a
+section the document actually has. Suite **371 → 374**.
+
+**15 of 15 mutations now fail**, including the relaxing ones — adding a curated plan whose SQL
+names a column of another relation, adding a curated policy question that names no section, and
+the two value drifts that keep the SQL perfectly valid and return nothing (`status = 'past_due'`
+in the plan; the generator renaming the status it writes).
+
+Three limits worth stating, all measured. The empty-result test is the **single owner** of the
+zero-row family: weakened, the value drift in the curated SQL goes green and every other test in
+the repo stays quiet. The policy half was **not** the orphan it looked like — `tests/test_rag.py`
+already pinned `Credit holds` and `Write-off thresholds` through retrieval, so only `Payment
+plans` had no owner; the new assertion is redundant defence for two of the three sections. And
+retrieval **ranking** is not measured here at all: the offline suite uses the deterministic
+hashing embedding as a stand-in for MiniLM, so "this query finds that section first" is a claim
+the shipped embedding would have to answer for, and does not.
 
 ---
 

@@ -295,6 +295,156 @@ def test_curated_questions_match_ui_suggestions() -> None:
     assert not missing, f"UI suggestions not in curated cache: {missing}"
 
 
+# --- curated plans, replayed against a real ledger ---------------------- #
+#
+# The guard validates *relation names* and never looks at a column, so the two
+# tests above accept SQL that cannot run: `guard_query("SELECT no_such_column
+# FROM v_customer_ar")` returns a wrapped query, happily. Measured: renaming
+# `v_customer_ar.overdue_amount` in the generator left this whole file green
+# while three curated plans — three one-click chips on the live demo — became
+# `Binder Error` at replay, and the visitor gets the slow tiny model instead of
+# the instant answer the chip promises.
+#
+# So these replay every curated plan through `replay_plan`, the same function
+# the demo runs on a cache hit, against the ledger `data/generate.py` builds.
+
+
+@pytest.fixture(scope="module")
+def policy():
+    """The real policy document, indexed offline into an ephemeral collection.
+
+    The deterministic (hashing) embedding stands in for MiniLM, so what this
+    fixture supports is "retrieval finds *a* section and names it", never "this
+    query ranks that section first" — the ranking belongs to the real embedding
+    and is not measured here.
+    """
+    from src.rag.index import build_index
+
+    return build_index(
+        chromadb.EphemeralClient(),
+        str(_repo_root() / _shipped("policy_path")),
+        "curated_policy_replay",
+        DeterministicEmbeddingFunction(),
+    )
+
+
+def _repo_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1]
+
+
+def _shipped(field: str):
+    """The default that ships, read off `Settings` instead of copied here.
+
+    Not `Settings()`: that would read the developer's git-ignored `.env`, and a
+    local `MAX_ROWS=5` must not quietly change what these assert.
+    """
+    from src.core.config import Settings
+
+    return Settings.model_fields[field].default
+
+
+def _replay(plan, ledger, policy):
+    from src.agent.plan_replay import replay_plan
+
+    return replay_plan(
+        plan,
+        ledger,
+        policy,
+        max_rows=_shipped("max_rows"),
+        search_k=_shipped("search_k"),
+    )
+
+
+def test_every_curated_plan_replays_against_the_real_ledger(ledger, policy) -> None:
+    """The column-level owner the guard cannot be.
+
+    A `ReplayError` here is exactly what a visitor would hit: the chip falls
+    through to the LLM, on a free CPU, for a question that was supposed to be
+    instant. Tool usage is asserted too, so a plan that silently degrades to
+    fewer steps than it declares is not read as a pass.
+    """
+    from data.curated_plans import curated_plans
+
+    for question, plan in curated_plans().items():
+        result = _replay(plan, ledger, policy)
+        expected = list(dict.fromkeys(step.tool for step in plan.steps))
+        assert result.tools_used == expected, question
+        assert result.reply.strip(), question
+
+
+def test_every_curated_query_still_returns_rows(ledger, policy) -> None:
+    """Empty is the failure a schema check cannot see.
+
+    Every column still exists, the SQL still parses, and `WHERE status =
+    'overdue'` returns nothing because the generator renamed a status. The chip
+    stays instant and answers "The query returned no rows." — worse than the
+    slow path, because it reads like a fact about the business.
+
+    The empty-render sentinel is taken *from the renderer* rather than copied as
+    a string literal: a reworded message would otherwise make this test pass
+    while stating nothing.
+    """
+    from data.curated_plans import curated_plans
+
+    from src.agent.plan_replay import _render_rows
+
+    empty = _render_rows(["any_column"], [])
+    assert empty.strip() and empty != _render_rows(["any_column"], [(1,)])
+
+    for question, plan in curated_plans().items():
+        if not any(step.tool == "query_ledger" for step in plan.steps):
+            continue
+        assert empty not in _replay(plan, ledger, policy).reply, question
+
+
+# The section each curated policy query exists to reach. Written here, outside
+# both the plans and the document, because neither can be checked against
+# itself: the query is free text with no schema, and retrieval always returns
+# *something*, so deleting the section a chip asks about is silent — the visitor
+# gets the nearest surviving chunk, presented as the policy's answer.
+CURATED_POLICY_SECTIONS = {
+    "credit hold rule threshold": "Credit holds",
+    "write-off candidate days past due": "Write-off thresholds",
+    "payment plan eligibility": "Payment plans",
+}
+
+
+def test_every_curated_policy_step_reaches_a_section_that_exists(policy) -> None:
+    """The policy half of the same question.
+
+    Two assertions with different jobs: the section a curated query depends on
+    is still in the document (renaming `## Credit holds` turns this red), and
+    the replay path still cites *a* section rather than dumping an unattributed
+    chunk. What it deliberately does not claim is ranking — the deterministic
+    embedding is a stand-in for MiniLM, so "this query retrieves that section
+    first" is not measurable here (see the `policy` fixture).
+    """
+    from data.curated_plans import curated_plans
+
+    from src.agent.plan_replay import _replay_search
+    from src.rag.chunking import chunk_policy
+
+    path = _repo_root() / _shipped("policy_path")
+    headings = {c.heading for c in chunk_policy(path.read_text(encoding="utf-8"), path.name)}
+    assert headings, "the policy document parsed into no sections"
+
+    queries = {
+        step.args["query"]
+        for plan in curated_plans().values()
+        for step in plan.steps
+        if step.tool == "search_policy"
+    }
+    # Equality, not containment: a curated query added without naming the
+    # section it targets would otherwise skip every check below.
+    assert queries == set(CURATED_POLICY_SECTIONS)
+
+    for query, section in sorted(CURATED_POLICY_SECTIONS.items()):
+        assert section in headings, f"{query!r} targets a section the policy no longer has"
+        rendered = _replay_search({"query": query}, policy, _shipped("search_k"))
+        assert any(f"**{heading}**" in rendered for heading in headings), query
+
 # --- tiny-model prompt + graceful recursion (ADR-013) ------------------- #
 
 

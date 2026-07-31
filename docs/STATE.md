@@ -527,8 +527,9 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > 3. Hit `POST /api/chat` once (or watch the demo run) → note **one response latency**.
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
-> **2026-07-31 — items 1–4 CLOSED (see the addenda below); only item 5 is still OPEN, plus the
-> new `R1-C11`. The list below is the audit as it was written, kept as the record.**
+> **2026-07-31 — items 1–4 and the follow-on `R1-C11` are CLOSED (see the addenda below). Item 5
+> is not a guarantee gap; it was triaged to the cleanup entry under §Next. The list below is the
+> audit as it was written, kept as the record.**
 > A line-by-line audit of `graph/tools/providers/schema_hints/message_utils/constrained` ran **28
 > mutations against the suite; 19 stayed green**. Nothing was fixed in code this session — three
 > false comments were corrected and ADR-004 got a dated amendment. What is open:
@@ -604,6 +605,25 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > validates *relation names* and never touches columns — measured: renaming `v_customer_ar
 > .overdue_amount` in the generator leaves every plan-cache test green (only the two new hint tests
 > go red), and `guard_query("SELECT no_such_column FROM v_customer_ar")` is accepted and wrapped.
+>
+> **Addendum 2026-07-31 (`R1-C11`) — closed. The baked SQL now runs before it ships.**
+> Both measurements above were re-confirmed, then closed: `tests/test_plan_cache.py` replays every
+> curated plan through `replay_plan` — the function a cache hit runs — against a ledger built by
+> `data/generate.py` through its own entry point (**371 → 374**). The `ledger` fixture moved to
+> `tests/conftest.py` so the prompt suite and the replay suite share one, rather than each
+> building a ledger that could drift from the other. Three properties kept apart on purpose: the
+> plan replays and reports the tools it declares, every ledger query still returns **rows**, and
+> every curated policy query still targets a section the document has.
+> **15 of 15 mutations now fail**, the relaxing ones included: a curated plan added with a column
+> that belongs to another relation, a curated policy question added without naming its section,
+> and the two value drifts that keep the SQL valid and return nothing.
+> Three measured limits: the empty-result test is the **single owner** of value drift *inside the
+> curated SQL* (weaken it and that mutation goes green repo-wide) but not of value drift in the
+> generator, which the schema-hint value-set tests also catch; the policy half was **already owned** for
+> two of its three sections by `tests/test_rag.py` — only `Payment plans` was an orphan, so that
+> assertion is redundant defence for the other two; and retrieval **ranking** is not measured
+> offline at all, since the deterministic embedding only stands in for MiniLM. Details in
+> **ADR-009 Amendment 2026-07-31**.
 
 ## Done
 - 2026-07-02: **Phase 6 Layer 2 — grammar-constrained tool-calls (ADR-011).**
