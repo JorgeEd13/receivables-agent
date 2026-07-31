@@ -219,9 +219,10 @@ tests instead of the code, **4 of 6** mutations stay green.
 
 > ⚠️ **OPEN — the live demo still runs the vulnerable guard.** Re-measured 2026-07-30 after the
 > pinning fix: `git rev-list --count space/main..origin/main` = **54**, this commit included
-> — re-measured **2026-07-31 after `R1-C5`: 56** (50 → 52 → 54 → 56; every guard round widens it,
-> and this one shipped `src/` + `tests/`, so the demo is now behind on the error contract too)
-> (50 → 52 → 54; every guard fix since widens this gap rather than closing it). The deploy target is the **`space`
+> — re-measured **2026-07-31 after `R1-C6`: 58** (50 → 52 → 54 → 56 → 58; every guard round widens
+> it). Of those 58, `R1-C5` shipped `src/` + `tests/`, so the demo is behind on the error contract
+> too; `R1-C6` is tests + docs only and adds count without adding behavioural
+> drift. The deploy target is the **`space`
 > remote** (`space/main`), not a `space-deploy` branch — that branch no longer exists on `origin`
 > and the earlier "43 commits behind `space-deploy`" line named a target that is gone. `git push
 > origin` does not deploy the HF Space. Still needs a dedicated session: the cherry-pick could not
