@@ -307,6 +307,43 @@ a different one. And the same exercise on the tests instead of the code: **6 of
 6** assertion-gutting mutations stay green, unchanged from the 6-of-7 recorded
 above. Nothing covers a test file except running the mutations.
 
+**Amendment 2026-07-31 — guarantee 1 was asserted only by two dead tests.**
+Section 2 of the adversarial suite ("nothing may be created") carried a payload
+that depended on the literal-masking desync this ADR removed. With the masker
+gone, `WRAPPER_ESCAPE` is refused by `Parser Error: syntax error at or near ")"`
+— it is a syntax error in the caller's own text, not a wrapper escape. The two
+end-to-end tests around it went on passing anyway: `contextlib.suppress`
+swallowed the parse error exactly as it had swallowed the refusal, and the
+`pwned` object it then proved absent had never existed under any implementation.
+**Measured: with `guard_query` removed from both calls, the suite stayed at 336
+green — zero red.**
+
+The consequence is larger than the dead payload. Deleting the SELECT/WITH-only
+check in `_syntax_tree` also left the pre-amendment suite at **336 green**. The
+first guarantee in the file's own threat model was pinned by exactly the two
+tests that had stopped testing.
+
+The rewrite keeps `WRAPPER_ESCAPE` as a regression floor with its reason named,
+and replaces the rest with live payloads — `CREATE TEMP TABLE`, `CREATE
+TEMPORARY VIEW`, `PREPARE`, `CREATE TEMP MACRO` — each asserted to be **accepted
+by the engine** when the guard is out of the way. That premise is a test, not a
+comment: a `connect_readonly` connection is read-only against the ledger file
+but its `temp` catalog is writable, so for these four the guard is the only
+thing standing there. `contextlib.suppress` is gone. Suite **336 → 346**;
+removing `guard_query` from the calls is now **8 red**.
+
+**And the half that cuts the other way, recorded because it weakens the claim.**
+Neither guard mutation is a bypass. With the SELECT/WITH check deleted, a
+`CREATE TEMP TABLE` is still refused one layer later by `json_deserialize_sql`
+("Query could not be normalized"). Relaxing the statement count to tolerate a
+trailing statement — the shape a real *"support trailing semicolons"* PR would
+take — is 6 red and also not a bypass: `json_serialize_sql` rejects
+two-statement text as a unit, so the refusal simply moves to the SELECT/WITH
+check. No single-point mutation tried here creates the object. The guarantee is
+held redundantly by three layers, and what these tests pin is **which layer
+speaks and what it says** — the sentence handed back to the model — not whether
+the object appears. Test-side: **4 of 6** mutations of the new tests stay green.
+
 **Consequences.**
 
 - **Positive.** The whole class of scanner/executor disagreement is gone. The

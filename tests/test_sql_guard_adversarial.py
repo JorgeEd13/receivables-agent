@@ -40,8 +40,6 @@ nothing ever reads it. R4 is that finding.
 
 from __future__ import annotations
 
-import contextlib
-
 import duckdb
 import pytest
 
@@ -290,10 +288,66 @@ def test_desync_does_not_read_a_non_allowlisted_relation(con) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 2. The desync also hides `;` from the statement splitter, so the guard's
-#    single-statement rule and its `SELECT * FROM (...) LIMIT n` wrapper can
-#    both be escaped: the wrapper's closing `)` is closed early and arbitrary
-#    statements are appended.
+# 2. The desync also hid `;` from the statement splitter, so the guard's
+#    single-statement rule and its `SELECT * FROM (...) LIMIT n` wrapper could
+#    both be escaped: the wrapper's closing `)` was closed early and arbitrary
+#    statements were appended.
+#
+#    CLOSED by the tree walk (ADR-022), and this banner is dated 2026-07-31.
+#    The payload below stopped working when the masker died, and the tests that
+#    used it went on passing — which is the failure mode this file exists to
+#    catch. Measured on DuckDB 1.5.3, in this order:
+#
+#    * `WRAPPER_ESCAPE` is refused by `Parser Error: syntax error at or near
+#      ")"`. Not by the single-statement rule, not by the wrapper. There is no
+#      masked copy to desynchronise, so the trailing `) AS q` that used to close
+#      the wrapper early is now just a syntax error in the caller's own text.
+#    * the two end-to-end tests below passed with `guard_query` REMOVED from the
+#      call: 184 green in this file, zero red. `contextlib.suppress` swallowed
+#      the parse error exactly as it swallowed the refusal, and `pwned` never
+#      existed under any implementation. They asserted nothing about the guard.
+#    * the thing they claimed to protect is real and was never tested. On a
+#      `connect_readonly` connection — read-only, `enable_external_access=false`,
+#      `lock_configuration=true` — DuckDB ACCEPTS `CREATE TEMP TABLE`,
+#      `CREATE TEMPORARY VIEW`, `PREPARE` and `CREATE TEMP MACRO`, and the
+#      objects are then readable. Only a non-temp `CREATE` is refused by the
+#      engine (`Cannot execute statement of type "CREATE"`), and `ATTACH
+#      ':memory:'` by read-only mode. So for four kinds of object the guard is
+#      the *only* thing standing there, and a dead payload was all that guarded
+#      it.
+#
+#    The rewrite keeps the historical payload as a regression floor with its
+#    reason named, and adds live ones: statements the engine really does execute,
+#    refused for a reason the assertion states. `contextlib.suppress` is gone —
+#    it is the mechanism that let this rot in the first place.
+#
+#    MEASURED AFTER THIS AMENDMENT (346 tests, was 336). The mutation that this
+#    whole block exists for — removing `guard_query` from the end-to-end calls —
+#    is now 8 red, where the old pair was 0.
+#
+#    AND THE FINDING THAT CAME OUT OF MEASURING IT, which is bigger than the
+#    dead payload: deleting the SELECT/WITH-only check in `_syntax_tree` left
+#    the pre-amendment suite at 336 GREEN. Guarantee 1 — the first one in this
+#    file's threat model — was asserted by exactly the two tests that had
+#    stopped asserting anything. It is 4 red now, and all four are from this
+#    block.
+#
+#    State the other half, because it cuts the other way. That mutation is NOT
+#    a bypass: with the check deleted, a `CREATE TEMP TABLE` is still refused
+#    one layer later, by `json_deserialize_sql` ("Query could not be
+#    normalized"). Relaxing the statement count to allow a trailing statement
+#    (the shape a real "support trailing semicolons" PR would take) is 6 red
+#    and also not a bypass — the refusal moves to the SELECT/WITH check,
+#    because `json_serialize_sql` rejects two-statement text as a unit. No
+#    single-point mutation found here creates the object. The guarantee is held
+#    redundantly by three layers, and what these tests pin is WHICH layer
+#    speaks and what it says — the sentence the two callers hand back to the
+#    LLM — not whether the object gets created.
+#
+#    Mutations of the guard, for the record: delete the single-statement check
+#    6 red (4 of them from this block; 2 pre-existing) · delete the
+#    SELECT/WITH-only check 4 red (all from this block) · allow a trailing
+#    statement 6 red. The test-side measurement is at the end of the block.
 # --------------------------------------------------------------------------- #
 
 WRAPPER_ESCAPE = (
@@ -304,29 +358,82 @@ WRAPPER_ESCAPE = (
 
 
 def test_wrapper_cannot_be_escaped_by_hidden_semicolons() -> None:
-    with pytest.raises(GuardrailError):
+    """A regression floor for a dead attack, and the assertion says so.
+
+    Naming the parse error is not a decoration: with a bare
+    `pytest.raises(GuardrailError)` this test cannot tell "the wrapper held"
+    from "the payload rotted", which is the state it was actually in.
+    """
+    with pytest.raises(GuardrailError, match=r"does not parse.*syntax error"):
         guard_query(WRAPPER_ESCAPE)
 
 
-def test_nothing_can_be_created_end_to_end(con) -> None:
-    """Guarantee 1: nothing may be created. Temp objects are still objects, and
-    a read-only DuckDB connection happily creates them."""
-    with contextlib.suppress(GuardrailError, duckdb.Error):
-        con.execute(guard_query(WRAPPER_ESCAPE))
-    with pytest.raises(duckdb.Error):
-        con.execute("SELECT * FROM pwned")
+# The live half. Each pair is (statement, how to prove the object exists).
+# Every one of these is ACCEPTED by a `connect_readonly` connection when the
+# guard is not in the way — that is asserted below rather than trusted, because
+# a refusal test whose payload the engine would have refused anyway proves
+# nothing about the guard.
+CREATABLE_ON_A_READ_ONLY_CONNECTION = [
+    ("CREATE TEMP TABLE pwned AS SELECT 1 AS v", "SELECT * FROM pwned"),
+    ("CREATE TEMPORARY VIEW pwned_view AS SELECT 1 AS v", "SELECT * FROM pwned_view"),
+    ("PREPARE evil AS SELECT 1", "EXECUTE evil"),
+    ("CREATE TEMP MACRO pwned_macro() AS 1", "SELECT pwned_macro()"),
+]
+CREATABLE_IDS = ["temp_table", "temp_view", "prepared_statement", "temp_macro"]
 
 
-def test_prepared_statements_cannot_be_created(con) -> None:
-    sql = (
-        "SELECT $a$'$a$ AS z FROM invoices) AS q; "
-        "PREPARE evil AS SELECT 1; "
-        "SELECT * FROM (SELECT 1"
-    )
-    with contextlib.suppress(GuardrailError, duckdb.Error):
-        con.execute(guard_query(sql))
+@pytest.mark.parametrize(
+    ("statement", "read_it_back"), CREATABLE_ON_A_READ_ONLY_CONNECTION, ids=CREATABLE_IDS
+)
+def test_the_engine_really_does_create_these(con, statement: str, read_it_back: str) -> None:
+    """The premise of the two tests below: read-only does NOT mean "creates
+    nothing". Temp objects live in the `temp` catalog, which is writable on a
+    read-only connection by design. If DuckDB ever closes this, these refusal
+    tests stop being about the guard and this one goes red to say so."""
+    con.execute(statement)
+    assert con.execute(read_it_back).fetchall() == [(1,)]
+
+
+@pytest.mark.parametrize(
+    ("statement", "read_it_back"), CREATABLE_ON_A_READ_ONLY_CONNECTION, ids=CREATABLE_IDS
+)
+def test_nothing_can_be_created_end_to_end(con, statement: str, read_it_back: str) -> None:
+    """Guarantee 1, on its own: a creating statement is not a SELECT."""
+    with pytest.raises(GuardrailError, match=r"read-only SELECT / WITH"):
+        con.execute(guard_query(statement))
     with pytest.raises(duckdb.Error):
-        con.execute("EXECUTE evil")
+        con.execute(read_it_back)
+
+
+@pytest.mark.parametrize(
+    ("statement", "read_it_back"), CREATABLE_ON_A_READ_ONLY_CONNECTION, ids=CREATABLE_IDS
+)
+def test_appended_statements_never_reach_the_engine(
+    con, statement: str, read_it_back: str
+) -> None:
+    """Guarantee 1 again, through the door the original payload tried to force —
+    with a plain `;` instead of a quoting trick, because the trick is what died.
+
+    Unguarded, DuckDB executes both halves of this string and the object exists;
+    that is what makes the refusal below attributable to the guard.
+    """
+    with pytest.raises(GuardrailError, match=r"single statement"):
+        con.execute(guard_query(f"SELECT amount FROM invoices; {statement}"))
+    with pytest.raises(duckdb.Error):
+        con.execute(read_it_back)
+
+
+# MEASUREMENT NOTE for the block above, kept next to what it measures.
+# Six mutations applied to THESE TESTS instead of to the guard, and four stay
+# green: dropping either `match=`, reducing the engine probe to `is not None`,
+# and deleting the read-it-back assertions all pass at 346. Two go red — taking
+# `guard_query` out of the calls (8), which is the point of the rewrite, and
+# swapping a live statement back for the dead `WRAPPER_ESCAPE` (3), which is
+# red only because `test_the_engine_really_does_create_these` refuses to
+# execute it. That probe is the one thing holding the other two honest; it is a
+# test and not a comment for exactly that reason. Four green out of six is the
+# same ratio ROUND 6 measured, and the same conclusion: nothing covers a test
+# file except having run the mutations.
 
 
 # --------------------------------------------------------------------------- #

@@ -193,6 +193,24 @@ and silently dropped the case — a fixture one type or one row from production 
 test, not a smaller one. On the tests instead of the code, **6 of 6** assertion-gutting mutations
 stay green.
 
+**2026-07-31 — section 2 of the adversarial suite was testing a dead payload. 336 → 346
+tests.** The "nothing may be created" block relied on the literal-masking desync that ADR-022
+removed; without a masker, its payload is just a syntax error in the caller's text, and
+`contextlib.suppress` hid that as readily as it hid the refusal. **Measured: `guard_query`
+removed from both end-to-end calls left the suite at 336 green — zero red.** Worse, deleting the
+SELECT/WITH-only check in the guard *also* left 336 green: the first guarantee in the file's own
+threat model was asserted by exactly the two tests that had stopped asserting.
+
+Rewritten with live payloads — `CREATE TEMP TABLE`, `CREATE TEMPORARY VIEW`, `PREPARE`,
+`CREATE TEMP MACRO` — plus a probe that asserts the engine really does accept each one when the
+guard is out of the way (a read-only connection is read-only against the *file*; its `temp`
+catalog is writable). Removing `guard_query` is now **8 red**. **The half that cuts the other
+way:** neither guard mutation is a bypass — the refusal moves one layer down, to
+`json_deserialize_sql`. Relaxing the statement count to allow a trailing statement, the shape a
+real PR takes, is 6 red and still not a bypass. The guarantee is held redundantly by three
+layers; what the new tests pin is **which layer speaks**, not whether the object appears. On the
+tests instead of the code, **4 of 6** mutations stay green.
+
 > ⚠️ **OPEN — availability.** The guard bounds what can be READ, not how much WORK a query
 > may do. `WITH RECURSIVE invoices(n) AS (… n < 100000000) …`, `repeat('a', 1000000000)` and a
 > six-way self-cartesian join are all **accepted** and never return; the outer `LIMIT 200` caps
