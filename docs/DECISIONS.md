@@ -601,6 +601,32 @@ Tier-specific prompt + a hard step cap:
 - Strong/cloud models are unaffected (full prompt, native tool-calling, same high cap in
   practice since they rarely loop).
 
+### Amendment 2026-07-31 — the second prompt is a second copy of the schema, and neither had an owner
+
+The decision above accepted a duplicated schema description (`SCHEMA_HINTS` and
+`SCHEMA_HINTS_BRIEF`) on the grounds that the two texts serve different audiences. What it did
+not say is that **both are unverified copies of what `data/generate.py` builds**. A line-by-line
+audit measured the gap: renaming `v_dso` to a non-existent view inside the prompt left the suite
+at **346 green**. The relation allow-list has been pinned against a real catalog since ADR-022's
+round 6; the text the *model* reads had nothing.
+
+The failure mode is the expensive kind precisely because nothing is broken: the SQL is
+syntactically perfect, the guard accepts it, DuckDB raises `Catalog Error`, the ReAct loop feeds
+that back as an observation and tries again until the step cap of this ADR fires — and the
+degradation message blames the tiny model for a prompt defect.
+
+`tests/test_schema_hints.py` closes it by generating a real ledger (60 customers, ~0.3 s, through
+`generate.main()` so the fixture cannot drift from the pipeline) and comparing **surfaces**: the
+catalog decides what is checked, the prompts are checked against it, in both directions — plus
+the value sets the text promises about *data*, which no schema check can see. Suite **359 → 368**;
+15 of 15 mutations across the two prompts, the generator and the allow-list now fail.
+
+Two limits worth stating. The brief prompt is a deliberate subset, so its columns are checked by
+containment, not equality — what pins its *scope* is one assertion, that it covers exactly the
+ledger's views, and weakening that assertion is the only measured way to drop a view from the
+tiny-model prompt unnoticed. And the curated plans of ADR-009/ADR-012 are still not executed
+against a real ledger anywhere: `guard_query` checks relation names, never columns.
+
 ---
 
 ## ADR-012 — Self-contained tiny-Ollama Hugging Face Space (`Dockerfile.hf`)

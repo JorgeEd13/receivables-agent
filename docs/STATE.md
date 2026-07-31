@@ -566,6 +566,24 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > annotation, and migrating to `langchain.agents.create_agent` means **deleting** it (that API
 > takes the wrapped runnable directly, fallback intact) rather than redesigning the fallback.
 > Full correction in **ADR-004 Amendment 2**.
+>
+> **Addendum 2026-07-31 (`R1-C8`) — item 3 closed. The prompt's schema map now has an owner.**
+> `tests/test_schema_hints.py` (**359 → 368**) checks both prompts against a **real ledger built
+> by `data/generate.py` through its own entry point** — relations, columns, and the value sets the
+> text promises (`status ∈ {paid, open, overdue}`, the five dunning stages). Surface against
+> surface, iterating the *catalog*: the earlier version of this pattern parametrized over the list
+> under test, and a list cannot pin itself (`R1-C3`). **15 of 15 mutations now fail** — the seven
+> that edit the prompt (including *relaxing* ones: a plausible extra column, a widened value set,
+> a brand-new false `∈` clause), the four that grow or rename things in the generator, and the one
+> that drops a relation from `ALLOWED_RELATIONS` while the prompt still advertises it. Renaming
+> `v_dso` in the hint, measured at 346 green in the audit, is now **4 red**.
+> The audit's "no drift today" held: the hand-check covered relation names, and the columns and
+> value sets it never checked turned out to be correct as well.
+> **Still open, and new (`R1-C11`):** the curated plans baked into the demo image
+> (`data/curated_plans.py`) carry literal SQL that is only ever passed through `guard_query`, which
+> validates *relation names* and never touches columns — measured: renaming `v_customer_ar
+> .overdue_amount` in the generator leaves every plan-cache test green (only the two new hint tests
+> go red), and `guard_query("SELECT no_such_column FROM v_customer_ar")` is accepted and wrapped.
 
 ## Done
 - 2026-07-02: **Phase 6 Layer 2 — grammar-constrained tool-calls (ADR-011).**
