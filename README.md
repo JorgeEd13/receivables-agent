@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://jorgeed-receivables-agent.hf.space"><img src="https://img.shields.io/badge/live%20demo-try%20it-brightgreen?logo=huggingface&logoColor=white" alt="Live demo — try it"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-368%20passing-brightgreen" alt="368 tests">
+  <img src="https://img.shields.io/badge/tests-371%20passing-brightgreen" alt="371 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
@@ -43,7 +43,7 @@ text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
 > **The honesty boundary.** A public, **clean-room** portfolio project on **100% synthetic
-> data** — no proprietary code, no real ledger. Shipped and live: **368 offline tests**, CI
+> data** — no proprietary code, no real ledger. Shipped and live: **371 offline tests**, CI
 > green. The UI is localized (EN/PT-BR), but the agent's answers come from the model and an
 > **English** policy corpus — they are not machine-translated.
 >
@@ -199,7 +199,7 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (368 tests)
+pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (371 tests)
 ```
 
 ## AI-native layer

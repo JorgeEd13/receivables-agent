@@ -746,6 +746,40 @@ then translate that JSON back into `AIMessage.tool_calls`:
 - Feeds Layer 3 (the HF demo image pins a tiny model + this shim) and Layer 4
   (the tiny-vs-strong numbers the README will quote).
 
+### Amendment — 2026-07-31 (`R1-C9`): the *meaning* half of ADR-011 had no test
+
+The decision above has two halves. The **grammar** (`format=schema`) fixes the
+shape of the reply; the **system nudge** built by `_render_hint` — which tool
+takes which field, when to stop, "ground every number in a tool result" — is what
+makes the model choose *well*. A line-by-line audit found only the first half was
+tested, and the gap was wide enough that three separate edits to the second half
+left the whole suite green (346 at the time, 368 when re-confirmed today):
+
+- deleting the nudge entirely (`_prepare` → `list(messages)`), and emptying it
+  (`_render_hint` → `""`) — the model would keep emitting valid JSON and pick badly;
+- `test_bind_tools_then_invoke…` asserted `_seen_format == build_schema(TOOLS)`,
+  a **circular oracle**: the same function on both sides of `==` agrees with any
+  edit to itself. Two schema mutations never turned it red;
+- the tier threshold: `<=` → `<` in `should_constrain` was green, and the reason
+  is structural rather than a missing case — the default ceiling is **3** and the
+  catalog ranks jump **2 → 4**, so no model exists that could tell the two
+  operators apart. A numeric threshold only has an owner if a real value lands on it.
+
+Closed by `tests/test_constrained.py` (**368 → 371**). The fake base model now
+records the messages it was called with, so the protocol is asserted against the
+whole menu (every tool with its field, a count anchor so no option is invented or
+dropped, the stopping criterion, the grounding instruction) rather than a sample;
+the schema is compared against a **spelled-out literal**; the threshold test moves
+the ceiling to **2**, a rank that exists, where `<=` and `<` finally differ. The
+async `_agenerate` twin — a hand-copied duplicate of `_generate`, previously
+uncovered — is pinned against the sync path.
+
+**14 of 14 mutations now fail**, including every *relaxing* one (an extra
+`reason` field in the grammar; a hint that keeps `final_answer` but drops the tool
+menu, the stopping criterion, or the grounding line; `quality <= 10`). **Nine of
+the fourteen were green before this change.** No production code changed: the gap
+was entirely in what the suite could see.
+
 ---
 
 ## ADR-010 — Hardware-aware local model selection (`OLLAMA_MODEL=auto`)

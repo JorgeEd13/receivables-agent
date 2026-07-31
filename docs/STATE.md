@@ -525,8 +525,8 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > 3. Hit `POST /api/chat` once (or watch the demo run) → note **one response latency**.
 > 4. Add a small "Evals" + "Latency" line to the README — all real, none guessed.
 
-> **2026-07-31 — items 1–2 CLOSED (see the addendum below); 3–5 still OPEN. The dual-provider
-> fallback has no test, and ADR-004's premise expired.**
+> **2026-07-31 — items 1–4 CLOSED (see the addenda below); only item 5 is still OPEN, plus the
+> new `R1-C11`. The list below is the audit as it was written, kept as the record.**
 > A line-by-line audit of `graph/tools/providers/schema_hints/message_utils/constrained` ran **28
 > mutations against the suite; 19 stayed green**. Nothing was fixed in code this session — three
 > false comments were corrected and ADR-004 got a dated amendment. What is open:
@@ -579,6 +579,24 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > `v_dso` in the hint, measured at 346 green in the audit, is now **4 red**.
 > The audit's "no drift today" held: the hand-check covered relation names, and the columns and
 > value sets it never checked turned out to be correct as well.
+> **Addendum 2026-07-31 (`R1-C9`) — item 4 closed. The suite now reads the protocol, not just
+> the grammar.** `tests/test_constrained.py` grew three tests (**368 → 371**) and the fake base
+> model records the *messages* it saw, not only the `format`. The JSON nudge is checked against
+> the whole menu — every tool with the field it takes, a count anchor so no option is invented or
+> dropped, the stopping criterion, the grounding line — and its position (last, after the caller's
+> turns, which survive in order). The circular oracle is gone: both schema assertions now compare
+> against a **spelled-out literal**, and the schema test compares whole surfaces instead of four
+> `in` checks. The threshold test moves the ceiling to **2**, the only place `<=` and `<` differ
+> given the catalog's 2 → 4 jump. The async `_agenerate` twin, previously uncovered, is pinned
+> against the sync path (differential, so neither side is the oracle).
+> **14 of 14 mutations now fail, 9 of them measured green before** — including the relaxing ones:
+> an extra `reason` field in the grammar, a hint that keeps `final_answer` but drops the tool menu
+> / the stopping criterion / the grounding line, and `quality <= 10`. No production code changed.
+> Two honest limits: dropping the stopping criterion is owned by **one** assertion (the first
+> mutation of it looked redundant only because it destroyed two sentences at once), and the literal
+> schema in the wrapper test and the whole-surface schema test are now **redundant owners** — each
+> catches the extra-field mutation alone. Details in ADR-011 **Amendment 2026-07-31**.
+>
 > **Still open, and new (`R1-C11`):** the curated plans baked into the demo image
 > (`data/curated_plans.py`) carry literal SQL that is only ever passed through `guard_query`, which
 > validates *relation names* and never touches columns — measured: renaming `v_customer_ar
