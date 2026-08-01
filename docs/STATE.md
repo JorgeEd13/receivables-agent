@@ -514,7 +514,45 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > (12 tests). Reuses the existing ChromaDB + MiniLM embeddings — no new dependency.
 > **Gotcha:** ChromaDB's in-process store can share state across ephemeral clients, so the
 > test fixture uses a unique collection name per test (a fixed name bled between tests).
+
+> **2026-08-01 — line-by-line audit of the plan-cache engine. Nothing fixed in code yet; three
+> claims are OPEN.** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
+> put under **43 valid mutations against the suite; 27 stayed green** (plus 6 test-side
+> mutations, all green, and 6 crossed pairs of which 4 leave the suite fully green). Every
+> number below was re-measured by a separate blind pass before being written here.
+> 1. **"Even a wrong match cannot do harm" is false as written** (module docstring of
+>    `plan_cache.py`, and ADR-009 Decision 3). The guard is a *security* boundary — read-only,
+>    allow-listed relation — and never looks at intent, so a wrong match cannot corrupt data or
+>    return a stale number **and can answer a different question**. Measured with the shipped
+>    MiniLM over the curated plans baked into the demo image: the typed question *"Which
+>    customers have the largest overdue balances?"* has as its nearest neighbour *"Which single
+>    customer has the largest overdue balance?"* at **0.9767**, so a request for a list replays
+>    `… LIMIT 1`; *"Who is the top customer by overdue balance?"* matches *"Who are the top 10
+>    customers by overdue balance?"* at **0.9424** and replays `… LIMIT 10`. Two curated
+>    questions sit **0.9156** apart, above the shipped 0.90 threshold. Raising the threshold does
+>    not fix it — the bad match is higher than paraphrases worth keeping. (The docstring's own
+>    example holds: *check* vs *send this account* is 0.743.)
+> 2. **The fall-through to the LLM has no owner.** ADR-009 Decision 2 promises that a
+>    `ReplayError` makes the caller fall back to the model. Replacing
+>    `except ReplayError: return None` in `CachedAgent._try_cache` with `raise` leaves the suite
+>    at **382 passed**. Sibling hole, measured through the real class: a corrupted cache entry
+>    makes `Plan.from_json` raise `JSONDecodeError` / `KeyError`, which that `except` does not
+>    catch either — both propagate out of `_try_cache`.
+> 3. **The freshness banner promises more than the replay delivers** (found by a blind
+>    adversarial pass, three executable repros, all reproduced here). `replay_plan` prefixes
+>    *every* reply with "the query was re-run live against the ledger, so the numbers are
+>    current" — including plans with **no `query_ledger` step at all**: **3 of the 12 curated
+>    plans are `search_policy`-only**, so three one-click demo questions assert ledger freshness
+>    over a number read from a static document, with zero SQL executed. Two more, same family:
+>    `guard_query("SELECT 425000.00 AS total_overdue")` **passes** (the relation allow-list is
+>    satisfied *vacuously* when the query reads no relation), so a plan can carry a frozen
+>    literal that replay prints as fresh; and a date literal inlined in cached SQL freezes the
+>    *semantics* — measured, a ledger with 4 overdue invoices answering `1`.
 >
+> Also measured, not guarantee holes → queued under §Next: the metric space, the three copies of
+> the 0.90 default, the synthetic `tool_calls`, the SSE `error` event, and the rendering
+> branches.
+
 > **NEXT (needs the notebook — model + normal network):** Layers 2–3 — hardened tiny local
 > LLM (`qwen2.5:0.5b/1.5b` Q4_K_M) with **GBNF grammar-constrained tool-calls** + KV cache;
 > self-contained `Dockerfile.hf` + `space-deploy` branch reusing forge-pdm F6 mechanics.
@@ -886,6 +924,28 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     Keep it, but the note is here so a future reader doesn't mistake it for load-bearing.
   - `tests/test_turn_control.py` defines `_NoCache` **three times** (two local, one module
     level, only one of which has `warm`). Collapse into one fixture.
+- **Cleanup, low priority (queued 2026-08-01, plan-cache pass):** six items, none of them a
+  guarantee hole — each measured to leave the suite fully green.
+  - **The metric space has no owner.** `_CACHE_METADATA = {"hnsw:space": "cosine"}` is what makes
+    `distance <= 1 - threshold` correct; switching it to `l2` or `ip` keeps all 382 tests green.
+    Verified against the installed chromadb **1.5.9** that the metadata key is still honoured
+    (without it a collection is created as `l2`). For normalised vectors `ip` is identical to
+    cosine and `l2` returns exactly twice the cosine distance — so `l2` would silently turn the
+    0.90 knob into 0.95: a slower demo, not a wrong answer. Pin the space in a test.
+  - **`0.90` is written in three places** — `Settings.plan_cache_threshold` (the one production
+    uses), `PlanCache.__init__` and `get_plan_cache`. Changing either default to `0.10` stays
+    green, because `build_agent` always passes the setting. Give the number one owner.
+  - **The synthetic `tool_calls` in `_replay_as_messages` have no owner.** Emptying them stays
+    green, and it would make a cached answer report no tools to the UI and to the eval suite,
+    whose golden checks assert which tool ran.
+  - **The SSE event vocabulary is a comment, not a contract.** Dropping the `cached` event or the
+    `error` event each stays green.
+  - **Presentation in `plan_replay` is untested:** the scalar branch of `_render_rows`, both
+    formatting branches of `_fmt`, and the `n_results=search_k` that fetches *k* and renders one.
+  - **The truncation note is wrong by construction:** `note = … f"showing the first {len(rows)}
+    rows"` prints the number of rows *shown*, not the total, so it implies a truncation that did
+    not happen; and the literal `25` is unrelated to the `max_rows` cap that actually truncates.
+    Changing 25 to 1000 stays green.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
