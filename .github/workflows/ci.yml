@@ -51,6 +51,18 @@ jobs:
       - name: Install (package + dev, mcp and data extras)
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,mcp,data]"
 
+      # `tests/test_plan_routing.py` measures where the *production* MiniLM puts
+      # two real questions relative to the cache threshold (ADR-009 Amendment
+      # 2026-08-01) — a claim the deterministic stand-in cannot make. That needs
+      # the ONNX model ChromaDB downloads once. Cached here so the routing suite
+      # is a gate that runs every time, not one that skips when the network is
+      # slow: a routing test that quietly skips is the absent owner it replaced.
+      - name: Cache the ONNX MiniLM embeddings
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma/onnx_models
+          key: chroma-onnx-minilm-v1
+
       # Offline by construction: no LLM provider extra is installed, so a test
       # that reaches for a live model fails here instead of passing quietly on a
       # machine that happens to have Ollama running.
@@ -58,6 +70,6 @@ jobs:
         run: python -m pytest -q
 
       # The guardrail suite is called out separately so a break in the security
-      # surface is legible in the run list, not buried in a count of 189.
+      # surface is legible in the run list, not buried in the full count.
       - name: Guardrail suite (security surface)
         run: python -m pytest tests/test_sql_guard.py tests/test_sql_guard_adversarial.py -q

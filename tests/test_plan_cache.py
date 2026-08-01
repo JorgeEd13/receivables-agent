@@ -128,6 +128,121 @@ def test_empty_cache_misses(cache) -> None:
     assert cache.lookup("anything at all") is None
 
 
+# --- ambiguity rejection (the mechanism; the geometry is test_plan_routing) ---
+
+_COUNT_PLAN = Plan((ToolStep("query_ledger", {"sql": "SELECT count(*) AS n FROM customers"}),))
+_LIST_PLAN = Plan((ToolStep("query_ledger", {"sql": "SELECT name FROM customers"}),))
+
+# Two stored questions one token apart, so a probe that drops the distinguishing
+# token lands *exactly* between them. Measured with this embedding: the two are
+# 0.857 apart, the equidistant probe is 0.926 from each (gap 0.000), and the probe
+# with a token added is 0.935 / 0.802 (gap 0.134). Each test below asks for the
+# margin its property needs, because these tests own the **rule**; where the
+# shipped 0.10 falls between real questions is measured against the production
+# embedding in ``test_plan_routing.py``.
+_AMBIGUOUS = ("how many customers are in the ledger", "how many invoices are in the ledger")
+
+
+@pytest.fixture
+def make_cache(embedding_function, request):
+    def _make(*, threshold: float = 0.5, margin: float) -> PlanCache:
+        client = chromadb.EphemeralClient()
+        name = f"plan_cache_{abs(hash(request.node.nodeid)) % 10**8}_{margin}"
+        return get_plan_cache(
+            client, name, embedding_function,
+            similarity_threshold=threshold, ambiguity_margin=margin,
+        )
+
+    return _make
+
+
+def test_question_between_two_different_plans_is_a_miss(make_cache) -> None:
+    """The fix of 2026-08-01: no clear winner ⇒ the LLM answers, not the cache."""
+    cache = make_cache(margin=0.05)  # rejects the 0.000 gap, keeps the 0.134 one
+    cache.warm(_AMBIGUOUS[0], _COUNT_PLAN)
+    cache.warm(_AMBIGUOUS[1], _LIST_PLAN)
+
+    assert cache.lookup("how many are in the ledger") is None
+    # Discriminating control: also well over the threshold, also not an exact
+    # question — so the miss above is the margin talking, not the threshold.
+    assert cache.lookup("how many customers are in the ledger x") is not None
+
+
+def test_question_between_two_copies_of_the_same_plan_is_a_hit(make_cache) -> None:
+    """Ambiguity is about the *plan*, not the wording — which is what lets the four
+    phrasings of the top-5-per-bucket question share one plan (``curated_plans``)."""
+    cache = make_cache(margin=0.05)
+    cache.warm(_AMBIGUOUS[0], _COUNT_PLAN)
+    cache.warm(_AMBIGUOUS[1], _COUNT_PLAN)
+
+    hit = cache.lookup("how many are in the ledger")
+    assert hit is not None and hit.steps == _COUNT_PLAN.steps
+
+
+def test_exact_question_hits_inside_an_ambiguous_neighbourhood(make_cache) -> None:
+    """The stored ID *is* the question, so an exact match is a key lookup, not a
+    guess. Without this the demo's one-click chips would fall to the slow model:
+    two of them are closer to each other than the shipped margin."""
+    cache = make_cache(margin=0.20)  # > the exact question's own 0.143 gap
+    cache.warm(_AMBIGUOUS[0], _COUNT_PLAN)
+    cache.warm(_AMBIGUOUS[1], _LIST_PLAN)
+
+    hit = cache.lookup(_AMBIGUOUS[0])
+    assert hit is not None and hit.steps == _COUNT_PLAN.steps
+
+    # Exact means exact. A question that *contains* a stored one ("...? And for
+    # enterprise only?") is a new question, so it goes through the ambiguity check
+    # like any other — here it is 0.935 / 0.802, inside this margin, so it misses.
+    # Measured: loosening the shortcut to a substring test passes every other test
+    # in the repo, which is what this line is here to stop.
+    assert cache.lookup(_AMBIGUOUS[0] + " x") is None
+
+
+def test_exact_means_the_same_question_not_the_same_bytes(make_cache) -> None:
+    """A one-click question arrives lower-cased or with a trailing space, and the
+    embedding puts those at distance 0.0000 from the original. Byte equality sent
+    them down the semantic path, where the 0.0844 neighbour tripped the margin and
+    the demo answered its own suggestion with the slow model (blind pass, 2026-08-01)."""
+    cache = make_cache(margin=0.20)
+    cache.warm(_AMBIGUOUS[0], _COUNT_PLAN)
+    cache.warm(_AMBIGUOUS[1], _LIST_PLAN)
+
+    for variant in (_AMBIGUOUS[0] + " ", " " + _AMBIGUOUS[0], _AMBIGUOUS[0].upper()):
+        hit = cache.lookup(variant)
+        assert hit is not None, f"byte variant of a stored question missed: {variant!r}"
+        assert hit.steps == _COUNT_PLAN.steps
+
+
+def test_a_rival_plan_hidden_behind_same_plan_neighbours_is_still_seen(make_cache) -> None:
+    """The ambiguity check reads *every* neighbour inside the margin, not the runner-up.
+
+    Found by a blind adversarial pass on 2026-08-01: with two phrasings of one plan
+    ranking first, looking only at rank 1 compares a plan with itself and the real
+    rival at rank 2 is never examined. The shipped corpus has four such phrasings.
+    """
+    cache = make_cache(margin=0.20)
+    cache.warm("top five customers by overdue balance per bucket", _COUNT_PLAN)
+    cache.warm("top five customers by overdue balance each bucket", _COUNT_PLAN)
+    cache.warm("top ten customers by overdue balance", _LIST_PLAN)
+
+    # Ranks 0 and 1 are the two phrasings of _COUNT_PLAN; _LIST_PLAN is at rank 2,
+    # 0.164 behind — inside this margin, so the question is ambiguous after all.
+    assert cache.lookup("top five customers by overdue balance bucket") is None
+
+
+def test_a_rival_plan_outside_the_margin_is_not_ambiguity(make_cache) -> None:
+    """The control for the test above: the scan stops at the margin, so the same
+    third neighbour must be harmless once it falls outside it — otherwise 'look at
+    more neighbours' would just be a slower way of switching the cache off."""
+    cache = make_cache(margin=0.05)
+    cache.warm("top five customers by overdue balance per bucket", _COUNT_PLAN)
+    cache.warm("top five customers by overdue balance each bucket", _COUNT_PLAN)
+    cache.warm("top ten customers by overdue balance", _LIST_PLAN)
+
+    hit = cache.lookup("top five customers by overdue balance bucket")
+    assert hit is not None and hit.steps == _COUNT_PLAN.steps
+
+
 # --- live replay: freshness + guard re-validation ---------------------------
 
 

@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://jorgeed-receivables-agent.hf.space"><img src="https://img.shields.io/badge/live%20demo-try%20it-brightgreen?logo=huggingface&logoColor=white" alt="Live demo — try it"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-382%20passing-brightgreen" alt="382 tests">
+  <img src="https://img.shields.io/badge/tests-396%20passing-brightgreen" alt="396 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
@@ -43,7 +43,7 @@ text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
 > **The honesty boundary.** A public, **clean-room** portfolio project on **100% synthetic
-> data** — no proprietary code, no real ledger. Shipped and live: **382 offline tests**, CI
+> data** — no proprietary code, no real ledger. Shipped and live: **396 offline tests**, CI
 > green. The UI is localized (EN/PT-BR), but the agent's answers come from the model and an
 > **English** policy corpus — they are not machine-translated.
 >
@@ -199,7 +199,7 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (382 tests)
+pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (396 tests)
 ```
 
 ## AI-native layer
@@ -235,11 +235,15 @@ lookup) — and **re-executes it live** on every hit:
   LLM's reasoning is skipped. Regenerate the ledger and the answer updates.
 - Only **read-only, guard-valid** plans are ever cached; a conservative
   similarity threshold means a miss simply falls through to the LLM.
+- A question that sits **between two different plans** is also a miss. Being
+  close enough is not enough — it has to be closer to one plan than to the
+  next by a margin, or the LLM answers it (ADR-009 Amendment 2026-08-01).
 
 It's caching the *reasoning*, not the output — a fast path that can't go stale.
-See [ADR-009](docs/DECISIONS.md) and
-[`tests/test_plan_cache.py`](tests/test_plan_cache.py) (the freshness test mutates
-the ledger and proves the replayed number moves).
+See [ADR-009](docs/DECISIONS.md), [`tests/test_plan_cache.py`](tests/test_plan_cache.py)
+(the freshness test mutates the ledger and proves the replayed number moves) and
+[`tests/test_plan_routing.py`](tests/test_plan_routing.py), which measures the
+routing with the **production** embedding rather than the offline stand-in.
 
 ## Runs on the box it's given (tiny model → strong model, no reconfig)
 

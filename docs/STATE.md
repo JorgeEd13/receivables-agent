@@ -515,8 +515,8 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > **Gotcha:** ChromaDB's in-process store can share state across ephemeral clients, so the
 > test fixture uses a unique collection name per test (a fixed name bled between tests).
 
-> **2026-08-01 — line-by-line audit of the plan-cache engine. Nothing fixed in code yet; three
-> claims are OPEN.** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
+> **2026-08-01 — line-by-line audit of the plan-cache engine. Item 1 is now CLOSED (addendum
+> below); items 2 and 3 remain OPEN.** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
 > put under **43 valid mutations against the suite; 27 stayed green** (plus 6 test-side
 > mutations, all green, and 6 crossed pairs of which 4 leave the suite fully green). Every
 > number below was re-measured by a separate blind pass before being written here.
@@ -552,6 +552,60 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > Also measured, not guarantee holes → queued under §Next: the metric space, the three copies of
 > the 0.90 default, the synthetic `tool_calls`, the SSE `error` event, and the rendering
 > branches.
+
+> **Addendum 2026-08-01 (`R1-C13`) — item 1 closed. The cache now refuses to guess between two
+> plans (382 → 396).**
+> Both measurements were re-confirmed first. The fix is a second rule, not a bigger threshold:
+> 0.9767 (the wrong match) is *higher* than paraphrases worth keeping, so no threshold separates
+> them — what does is **how much closer the winner is than the nearest different plan**. `lookup`
+> now examines every neighbour within `AMBIGUITY_MARGIN` (0.10, sitting between the widest
+> ambiguous gap of 0.0482 and the tightest legitimate paraphrase gap of 0.1589, both re-measured
+> on every run) and misses as soon as one of them holds a **different** plan. Comparing **plans**
+> rather than wording is what keeps the four curated phrasings of the top-5 question hitting.
+> **The margin alone would have broken the demo:** two one-click chips are 0.9156 apart, so
+> typing either exactly leaves a 0.0844 gap — inside the margin. Exact questions therefore
+> short-circuit the check (the stored ID *is* the question, so this is a key lookup, not a guess,
+> and there is no float tolerance involved) — on the same *question*, not the same bytes:
+> whitespace and case are normalised by one owner used on both sides.
+> Split in two files on purpose: the **mechanism** stays offline on the deterministic embedding,
+> the **geometry** cannot — a hashing stand-in says nothing about where MiniLM puts two real
+> questions, which is precisely why this defect lived under a green suite.
+> `tests/test_plan_routing.py` embeds the real corpus with the real model (all 66 curated pairs,
+> all 12 questions routed, both walls) and **does not skip** when the model is missing; CI caches
+> the ONNX download instead. Cost, stated honestly: the suite goes from ~5 s to ~12 s.
+> **Then a blind pass broke it, twice — and that is the story of this entry.** An instance with
+> no knowledge of the design got the four guarantees and the repo and was told to falsify them by
+> running code. Both holes are now closed, with tests:
+> 1. **The check read the runner-up, not the neighbourhood.** Four curated phrasings share the
+>    top-5 plan, so for a question in that cluster ranks 0 and 1 are the *same* plan — the guard
+>    compared a plan with itself and served the hit while the real rival sat at rank 2, **0.0738**
+>    away, inside the margin, unexamined. Three reproducing questions, 3 of 108 probes. Textbook
+>    enumerated guard: it looked at a fixed *position* instead of the *surface* the margin covers.
+> 2. **"Exact" was byte equality, and over-blocked.** A chip typed with a trailing space or a
+>    lower-cased first letter embeds at distance **0.0000** and was refused — it missed the
+>    shortcut, then the 0.0844 neighbour tripped the margin. The demo would have answered its own
+>    suggestion with the slow model.
+>
+> It also confirmed the half that matters: **12 poisoned plans** injected straight into the cache
+> (`DELETE`, stacked statements, CTAS, `COPY TO`, `read_csv_auto('/etc/passwd')`, `ATTACH`, …) were
+> all refused by `guard_query` on replay against a read-only connection, row counts unchanged.
+> **Mutations, two batteries: 17 code mutations 16 red against the first design; 11 valid, 9 red
+> against the code as it now stands.** Five limits: the *substring* relaxation of the exact match
+> still has a **single owner** (measured twice — it passed the whole repo until an assertion
+> existed, and deleting that assertion re-opens it even now, because the byte-variant surface test
+> accepts a substring); two mutations are indistinguishable by construction (`>=` vs `>`, and
+> `break` vs `continue` on ordered neighbours); the census's first count anchor was **tautological**
+> and the blind pass found the same defect in two more places — probe tables looped with no anchor,
+> shortenable one row at a time; ownership is uneven on purpose (9 of 11 reds have two owners);
+> and the red rate is inflated by construction, since these mutations were written alongside the
+> tests that catch them.
+> **Still not guaranteed:** a paraphrase *confidently* closest to a plan that answers a slightly
+> different question is still served — the margin rejects ambiguity, not wrongness. The blind pass
+> left a clean example that survives the fix: *"top 10 customers by overdue balance in each aging
+> bucket"* sits at **0.9841** from the top-5-per-bucket plan and is served with the right shape and
+> the wrong N — its neighbourhood is crowded (runner-up 0.0853 behind) but every neighbour in it is
+> another phrasing of the *same* plan, so there is no rival for the margin to find. Details in
+> **ADR-009 Amendment 2026-08-01**.
 
 > **NEXT (needs the notebook — model + normal network):** Layers 2–3 — hardened tiny local
 > LLM (`qwen2.5:0.5b/1.5b` Q4_K_M) with **GBNF grammar-constrained tool-calls** + KV cache;
@@ -927,7 +981,8 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 - **Cleanup, low priority (queued 2026-08-01, plan-cache pass):** six items, none of them a
   guarantee hole — each measured to leave the suite fully green.
   - **The metric space has no owner.** `_CACHE_METADATA = {"hnsw:space": "cosine"}` is what makes
-    `distance <= 1 - threshold` correct; switching it to `l2` or `ip` keeps all 382 tests green.
+    `distance <= 1 - threshold` correct; switching it to `l2` or `ip` kept the whole suite green
+    when this was measured (at 382 tests).
     Verified against the installed chromadb **1.5.9** that the metadata key is still honoured
     (without it a collection is created as `l2`). For normalised vectors `ip` is identical to
     cosine and `l2` returns exactly twice the cosine distance — so `l2` would silently turn the
@@ -935,6 +990,12 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
   - **`0.90` is written in three places** — `Settings.plan_cache_threshold` (the one production
     uses), `PlanCache.__init__` and `get_plan_cache`. Changing either default to `0.10` stays
     green, because `build_agent` always passes the setting. Give the number one owner.
+    *Partly discharged 2026-08-01 (`R1-C13`):* two of the three copies are now pinned **to each
+    other** — `test_the_shipped_threshold_is_the_one_these_tests_measure` fails if the setting
+    and `get_plan_cache`'s default disagree, so the routing measurements cannot describe a cache
+    nobody runs. `PlanCache.__init__` is still a third copy, and the number still has no single
+    owner. The new `AMBIGUITY_MARGIN` deliberately does not repeat the pattern: one constant,
+    referenced by both entry points.
   - **The synthetic `tool_calls` in `_replay_as_messages` have no owner.** Emptying them stays
     green, and it would make a cached answer report no tools to the UI and to the eval suite,
     whose golden checks assert which tool ran.

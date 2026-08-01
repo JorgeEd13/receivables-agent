@@ -935,6 +935,10 @@ Cache the question → **plan**, not the question → **answer**, and always
    0.90); a miss simply calls the LLM and warms the cache. Precision over recall:
    "check this account" never matches "send this account" — and even a wrong
    match is harmless, because every replayed plan is re-validated and read-only.
+   > ⚠️ The last clause of point 3 is **false as written** and was corrected on
+   > 2026-08-01 — see the amendment below. A wrong match cannot corrupt data or
+   > serve a stale number, which is what "re-validated and read-only" buys; it
+   > could still answer a *neighbouring* question. Nothing else in point 3 changed.
 4. **Drop-in wrapper.** `CachedAgent` presents the same `invoke`/`ainvoke`
    interface as the compiled agent, so the API, evals and tests are unchanged;
    `build_agent` wraps the agent when `plan_cache_enabled` (config-gated).
@@ -996,7 +1000,136 @@ retrieval **ranking** is not measured here at all: the offline suite uses the de
 hashing embedding as a stand-in for MiniLM, so "this query finds that section first" is a claim
 the shipped embedding would have to answer for, and does not.
 
----
+### Amendment 2026-08-01 (`R1-C13`) — "even a wrong match is harmless" was false, and the threshold alone could not make it true
+
+Point 3 above ended on a claim the code did not support. The correct statement splits in two,
+and only the first half was ever true:
+
+* a wrong match **cannot corrupt data or serve a stale number** — that is what re-validation
+  through the guard plus live read-only replay buys, and it holds;
+* a wrong match **can answer a neighbouring question**, with the same *"the numbers are
+  current"* seal on it. Measured with the shipped MiniLM over the curated corpus baked into
+  the demo image: the typed question *"Which customers have the largest overdue balances?"*
+  (a list) is **0.9767** from the curated plan that ends in `LIMIT 1`, and *"Who is the top
+  customer by overdue balance?"* (one customer) is **0.9424** from the plan that ends in
+  `LIMIT 10`. Both clear the 0.90 threshold, so both were served.
+
+**Raising the threshold does not fix this**, which is why the fix is a second rule rather than a
+bigger number: 0.9767 is *higher* than paraphrase matches worth keeping (measured, e.g. "total
+overdue by aging bucket" at 0.9324). What separates the two cases is not how close the winner
+is — it is **how much closer the winner is than the runner-up**. The wrong matches above are
+0.048 and 0.020 clear of a *different* plan; the legitimate ones are 0.159 to 0.598 clear.
+
+**Decision.** `PlanCache.lookup` examines **every neighbour within `AMBIGUITY_MARGIN` (0.10) of
+the winner** and refuses the hit as soon as one of them carries a **different** plan — the
+question sits between two plans, so the LLM answers it. The comparison is on the **plan**, not
+on the wording, which is what lets the four curated phrasings of the top-5-per-bucket question
+keep hitting: they are near-duplicates of each other but point at one plan, so they are never
+rivals.
+
+*Looking at the runner-up alone is not enough, and this corpus is exactly why* — see the blind
+pass below. With four phrasings sharing one plan, the two nearest neighbours of a question in
+that cluster are the **same** plan, and the real rival sits at rank 2, unexamined. The scan is
+bounded at 32 neighbours, which is a ceiling on how many same-plan near-duplicates can hide a
+rival, not a limit on the check: it stops at the margin either way.
+
+**The margin alone would have broken the demo.** Two curated one-click questions —
+*"Which single customer has the largest overdue balance?"* and *"Who are the top 10 customers
+by overdue balance?"* — are **0.9156** apart, so typing either exactly leaves a runner-up gap
+of 0.0844, *inside* the margin. Every hit on those two chips would have fallen through to the
+tiny CPU model. So an exact question short-circuits the check: the stored ID **is** the question
+text (`warm` keys on it), so an exact match is a key lookup, not a nearest-neighbour guess — a
+string comparison, with no float tolerance to get wrong.
+
+"Exact" means the same *question*, not the same *bytes*: `_same_question` collapses whitespace
+and case on both sides, one owner for the normalisation so the two sides cannot drift apart the
+way two copies of a `strip` did in ADR-014. Byte equality was measurably too strict — a chip
+typed with a trailing space or a lower-cased first letter embeds at distance **0.0000** and was
+still refused, because it missed the shortcut and then tripped the margin on that 0.0844
+neighbour.
+
+**Where 0.10 comes from.** Not taste: it sits between two measured walls **on the semantic
+path** — above the widest ambiguous gap (0.0482) and below the tightest legitimate paraphrase
+gap (0.1589) — and closer to the safe side, which is the ordering this ADR already chose ("a
+confidently-wrong number is worse than a slow one"). The walls are measured over paraphrases
+because exact questions never reach the margin; without that qualifier the claim is false, since
+two curated questions are 0.0844 apart. `tests/test_plan_routing.py` re-measures both walls on
+every run, so the constant cannot drift away from the corpus that justifies it.
+
+**Suite 382 → 396**, in two files on purpose. The mechanism (does an ambiguous neighbourhood
+miss? does an exact question survive it?) is tested offline with the deterministic embedding in
+`tests/test_plan_cache.py`. The **geometry** cannot be: a hashing stand-in says nothing about
+where MiniLM puts two real questions, which is exactly why this defect lived under a green
+suite. `tests/test_plan_routing.py` therefore embeds the real corpus with the real model — a
+census of all 66 curated pairs, all 12 questions routed to their own plan, and the two walls.
+It does **not** skip when the model is absent; CI caches the ONNX download instead, because a
+routing suite that quietly skips is the missing owner it was written to replace. The cost is
+honest: the suite goes from ~5 s to ~12 s.
+
+**Mutations, in two batteries.** Against the first design, 17 code mutations, 16 red. Against the
+code as it stands after the blind pass, **11 valid code mutations, 9 red**. The eleven, so the
+ratio is checkable rather than asserted — each is a one-line edit to `src/agent/plan_cache.py`:
+`AMBIGUITY_MARGIN` to 0.02 · to 0.30 (over-rejecting is also a defect) · `_NEIGHBOURS_SCANNED` to
+2 · the neighbour loop bounded to the runner-up · the rival test by identity (`is not`) instead
+of equality · `_same_question` to byte equality · to a substring test · the exact-match shortcut
+taken unconditionally · the `PlanCache.__init__` copy of the threshold to 0.50 · the window
+comparison `>=` to `>` · its `break` to `continue`. **The last two are the two that stay green**,
+and limit 2 says why. Five limits worth stating:
+
+1. **One relaxation still has a single owner** — loosening the exact match to a *substring* test,
+   which would let *"Who are the top 10 customers by overdue balance? Only enterprise ones."*
+   skip the ambiguity check and be served the plan for the question it merely contains. Measured
+   twice: it passed the entire repo until an assertion was written for it, and deleting that one
+   assertion re-opens it even now, with the byte-variant surface test in place (that test accepts
+   the substring version, since a variant does contain its original).
+2. Two mutations are **indistinguishable by construction**, not gaps: `>=` vs `>` on the window
+   (no measured gap lands exactly on 0.10) and `break` vs `continue` on it (neighbours arrive
+   ordered by distance, so nothing inside the window can follow something outside it).
+3. The census's first count anchor was **tautological**: it compared the loop's own iteration
+   count against a formula over the same list, so it held for any corpus. The blind pass found
+   the same defect in two more places — the probe tables were looped with no anchor, so either
+   could be shortened one row at a time and stay green. All three now pin literals.
+4. **Ownership is uneven, on purpose.** Nine of the eleven reds have two or more owners (the
+   mechanism suite and the routing suite catch the same relaxation from different angles); the
+   corpus census is the single owner of "a new curated plan collides with an existing one", and
+   the substring probe is the single owner of point 1.
+5. The high red rate is not evidence of a strong suite in general: these mutations were written
+   alongside the tests that catch them. The informative results are the ones that came out green
+   — and the ones a blind instance found that no mutation of mine did.
+
+**Then a blind pass attacked it, and two of the four claims fell.** An instance with no
+knowledge of the design was given the four guarantees and the repo, and told to falsify them by
+running code. It broke the first version of this fix in two places, both now closed and both
+with the tests above:
+
+1. **The ambiguity check read the runner-up, not the neighbourhood.** Four curated phrasings
+   share the top-5-per-bucket plan, so for a question in that cluster ranks 0 and 1 are the
+   *same* plan — the check compared a plan with itself and served the hit, while the real rival
+   (the top-10 plan) sat at rank 2, **0.0738** away, inside the margin and never examined. Three
+   reproducing questions, found in 3 of 108 generated probes. This is the enumerated-guard
+   failure in its usual costume: the guard looked at a fixed *position* instead of the
+   *surface* of neighbours the margin actually covers.
+2. **"Exact" was byte equality, and over-blocked.** A shipped chip typed with a trailing space
+   or a lower-cased first letter embeds at distance 0.0000 and was refused — the shortcut
+   missed, and the 0.0844 neighbour then tripped the margin. The demo would have answered its
+   own suggestion with the slow model.
+
+It also confirmed the claim that matters most: **12 poisoned plans injected straight into the
+cache** — `DELETE`, stacked `SELECT 1; DELETE`, CTAS, `COPY TO` a file, `read_csv_auto('/etc/passwd')`,
+`INSTALL`, `ATTACH`, `UPDATE … RETURNING` — were all refused by `guard_query` on replay against a
+`read_only=True` connection, row counts unchanged. The "cannot corrupt data, cannot serve a stale
+number" half of point 3 survived the attack it was written for.
+
+**What is still not guaranteed.** A paraphrase that is *confidently* closest to a plan that
+answers a slightly different question is still served — the margin rejects ambiguity, not
+wrongness, and no threshold can tell "closest" from "right". The blind pass produced a clean
+example, still true after the fix: *"top 10 customers by overdue balance in each aging bucket"*
+sits at **0.9841** from the top-5-per-bucket plan and is served — the right shape, the wrong N,
+under an honest freshness banner. Its neighbourhood is not empty, and that detail is the point:
+the runner-up is only 0.0853 behind, but every neighbour that close is **another phrasing of the
+same plan**, so there is no rival for the margin to find. The rule behaves exactly as designed
+and the answer is still to the wrong question. Fixing *that* is not a threshold problem; it needs
+the model, which is the thing the cache exists to skip.
 
 ## ADR-008 — AI-native layer: shared-guardrail MCP server + property-based evals
 

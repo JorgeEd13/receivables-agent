@@ -16,10 +16,28 @@ is never frozen.
 
 Storage reuses the RAG stack already in the repo (ChromaDB + the local ONNX
 MiniLM embeddings), so semantic lookup adds **no new dependency**. Similarity is
-cosine over the question embedding; a conservative threshold keeps
-"check this account" from ever matching "send this account" — and even a wrong
-match cannot do harm, because every replayed plan is re-validated by
-``sql_guard`` and runs read-only before it is used (``plan_replay``).
+cosine over the question embedding, under two rules: a conservative *threshold*
+(how close is close enough) and an *ambiguity margin* (how much closer than the
+nearest **different** plan). What a wrong match can and cannot do, precisely —
+the loose version of this sentence was corrected on 2026-08-01, see ADR-009
+Amendment:
+
+* it **cannot** corrupt data or serve a stale number: every replayed plan is
+  re-validated by ``sql_guard`` and runs read-only against the live ledger
+  (``plan_replay``), so a hit is never a frozen answer;
+* it **can** answer a *neighbouring* question. Measured on the shipped corpus:
+  "Which customers have the largest overdue balances?" (a list) is 0.9767 from
+  the curated plan that returns ``LIMIT 1``. The threshold does not catch that —
+  raising it would only cost legitimate hits. The ambiguity margin does: that
+  question is also 0.9285 from the ``LIMIT 10`` plan, and a gap that small
+  between two *different* plans means the question sits between them, so the
+  lookup misses and the LLM answers it;
+* it **can still** be a confident wrong match. The margin rejects *ambiguity*,
+  not *wrongness*: "top 10 customers by overdue balance in each aging bucket" is
+  0.9841 from the top-5-per-bucket plan and is served — right shape, wrong N. Its
+  neighbours are close (0.0853 behind) but all of them are other phrasings of the
+  *same* plan, so there is no rival to reject. Telling "closest" from "right"
+  needs the model, which is what a cache hit skips by definition.
 
 Honesty guardrails baked in here:
 
@@ -45,6 +63,45 @@ from src.agent.sql_guard import GuardrailError, guard_query
 # else is not cacheable (we can't guarantee we can reproduce it deterministically
 # and read-only), so it falls through to the LLM.
 REPLAYABLE_TOOLS: frozenset[str] = frozenset({"query_ledger", "search_policy"})
+
+# How much closer to the winner than to the runner-up a question must be before
+# we trust the routing, when the two point at *different* plans. One owner: both
+# entry points below default to this name, never to a second literal.
+#
+# Calibrated against the shipped corpus with the production MiniLM embeddings
+# (`tests/test_plan_routing.py` re-measures both walls on every run):
+#   * the widest measured *ambiguous* gap is 0.0482 — must be rejected;
+#   * the tightest measured *legitimate* paraphrase gap is 0.1589 — must survive.
+# 0.10 sits between them with room on both sides, and errs on the side ADR-009
+# already chose: a slow answer beats a confidently wrong one.
+AMBIGUITY_MARGIN: float = 0.10
+
+# How many neighbours the ambiguity check looks at. Two is not enough and the
+# reason is this corpus: four curated phrasings share the top-5-per-bucket plan,
+# so the two nearest neighbours of a question in that cluster are the *same* plan
+# and the genuinely different rival sits at rank 2, unexamined. Found by a blind
+# adversarial pass on 2026-08-01, three reproducing questions.
+#
+# The scan stops at the margin, so this is only a ceiling on how many same-plan
+# near-duplicates can hide a rival: if all 32 nearest neighbours hold one plan and
+# every one of them is inside the margin, there is no rival to find.
+_NEIGHBOURS_SCANNED: int = 32
+
+
+def _same_question(stored_id: str, question: str) -> bool:
+    """Whether a stored ID and a typed question are the same question.
+
+    ``warm`` stores the question text as the ID, so this is a **key** comparison,
+    not a distance one. It cannot be byte equality: a shipped one-click question
+    arrives with a trailing space or a lower-cased first letter often enough, and
+    MiniLM places those at distance **0.0000** from the original — measured, when
+    this was ``ids[0] == question``, those variants missed the shortcut, tripped
+    the margin against a 0.0844 neighbour and fell through to the slow model.
+
+    One owner for the normalisation, applied to both sides here, so the two sides
+    cannot drift apart the way two copies of a ``strip`` did in ADR-014.
+    """
+    return " ".join(stored_id.split()).casefold() == " ".join(question.split()).casefold()
 
 
 @dataclass(frozen=True)
@@ -137,19 +194,40 @@ class PlanCache:
         collection: Collection,
         *,
         similarity_threshold: float = 0.90,
+        ambiguity_margin: float = AMBIGUITY_MARGIN,
     ) -> None:
         self._collection = collection
         self._threshold = similarity_threshold
+        self._margin = ambiguity_margin
 
     def lookup(self, question: str) -> Plan | None:
         """Return a cached plan for a semantically similar question, or ``None``.
 
         ChromaDB returns cosine *distance* (``1 - cosine_similarity``); we accept
         a hit only when similarity ``>= threshold`` (distance ``<= 1 - threshold``).
+        Distance gaps and similarity gaps are the same number under cosine, which
+        is why the margin below can be compared against distances directly.
+
+        Several neighbours are fetched, not one, because a threshold alone cannot
+        tell "the same question, reworded" from "a question that sits *between*
+        two different plans". Every neighbour within ``ambiguity_margin`` of the
+        winner is examined, and the first one carrying a **different** plan makes
+        this a miss, so the caller falls through to the LLM (ADR-009 Amendment
+        2026-08-01). Near-duplicates of the winner's *own* plan are not rivals —
+        that is what lets four phrasings of one curated question keep hitting.
+
+        An **exact** question skips that check: the stored ID *is* the question
+        text, so an exact match is a key lookup, not a nearest-neighbour guess.
+        This is load-bearing, not an optimisation — two of the demo's one-click
+        questions are 0.9156 apart, closer to each other than the margin, so
+        without it every hit on those two chips would fall to the slow model.
         """
-        if self._collection.count() == 0:
+        stored = self._collection.count()
+        if stored == 0:
             return None
-        result = self._collection.query(query_texts=[question], n_results=1)
+        result = self._collection.query(
+            query_texts=[question], n_results=min(stored, _NEIGHBOURS_SCANNED)
+        )
         ids = result["ids"][0]
         if not ids:
             return None
@@ -160,10 +238,39 @@ class PlanCache:
         distance = distances[0]
         if distance is None or distance > (1.0 - self._threshold):
             return None
+        plan = self._plan_at(result, 0)
+        if plan is None:
+            return None
+        if _same_question(ids[0], question):
+            return plan
+
+        window = distance + self._margin
+        for index in range(1, len(ids)):
+            if index >= len(distances):
+                break
+            neighbour_distance = distances[index]
+            if neighbour_distance is None or neighbour_distance >= window:
+                break  # neighbours are ordered: everything left is outside the margin
+            rival = self._plan_at(result, index)
+            if rival is not None and rival != plan:
+                return None
+        return plan
+
+    @staticmethod
+    def _plan_at(result: Any, index: int) -> Plan | None:
+        """The plan stored on the ``index``-th neighbour, or ``None`` if absent.
+
+        ChromaDB nests results by query then by neighbour, and ``metadatas`` is
+        one of the fields a caller may not have asked for — hence the two levels
+        of indexing and the ``None`` handling.
+        """
         raw_metas = result["metadatas"]
         if raw_metas is None:
             return None
-        metadata = raw_metas[0][0] or {}
+        row = raw_metas[0]
+        if row is None or index >= len(row):
+            return None
+        metadata = row[index] or {}
         raw = metadata.get("plan")
         if not isinstance(raw, str) or not raw:
             return None
@@ -191,6 +298,7 @@ def get_plan_cache(
     embedding_function: EmbeddingFunction,
     *,
     similarity_threshold: float = 0.90,
+    ambiguity_margin: float = AMBIGUITY_MARGIN,
 ) -> PlanCache:
     """Open (or create) the plan-cache collection and wrap it in a ``PlanCache``."""
     collection = client.get_or_create_collection(
@@ -198,4 +306,8 @@ def get_plan_cache(
         embedding_function=embedding_function,
         metadata=_CACHE_METADATA,
     )
-    return PlanCache(collection, similarity_threshold=similarity_threshold)
+    return PlanCache(
+        collection,
+        similarity_threshold=similarity_threshold,
+        ambiguity_margin=ambiguity_margin,
+    )

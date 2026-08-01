@@ -311,6 +311,13 @@ class CachedAgent:
         genuine context-dependent follow-up ("and for enterprise only?") simply won't
         clear the conservative similarity threshold, so it falls through to the LLM.
         (Warming still requires a single-turn request — see ``_warm``.)
+
+        What "recognizing a known question" means got stricter on 2026-08-01: the
+        cache also refuses a question that is close to **two different plans**
+        without being clearly closer to one (ADR-009 Amendment). Before that, a
+        rephrased question could be served the plan of its neighbour — same answer
+        shape, different question — which is the failure this method's "is safe"
+        used to gloss over.
         """
         question = _last_user_message(messages)
         if not question:
