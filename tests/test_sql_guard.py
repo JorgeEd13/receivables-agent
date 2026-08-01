@@ -23,6 +23,7 @@ from src.agent.sql_guard import (
     DEFAULT_MAX_ROWS,
     GuardrailError,
     guard_query,
+    statement_identity,
     strip_wrapper_line_echo,
 )
 
@@ -325,3 +326,31 @@ def test_the_shape_recognised_is_duckdbs_and_not_merely_echo_ish() -> None:
     assert strip_wrapper_line_echo(
         tail.format(head="LINE up next: whatever", caret="       ^")
     ) == tail.format(head="LINE up next: whatever", caret="       ^")
+
+
+def test_anything_the_guard_runs_can_be_identified() -> None:
+    """If the guard accepts a statement, `statement_identity` must have an opinion.
+
+    The two entry points parse the *same* text (`_statement_text`), and this is
+    what says so. It matters because a caller that gets `None` falls back to a
+    text key, and the text key is the thing the tree identity exists to replace:
+    measured 2026-08-01, a single leading `\x0b` was enough — the guard stripped it
+    and ran the query, while the identity refused to parse it, so two statements
+    differing inside a string literal collapsed into one memo entry again.
+
+    The padding is *derived* from Python's own definition of the characters
+    `str.strip()` removes, not hand-picked. A list would prove only that the
+    listed characters were thought of; the property is that there is no character
+    one side strips and the other does not.
+    """
+    base = "SELECT name FROM customers WHERE name = 'John  Doe'"
+    identity = statement_identity(base)
+    assert identity is not None
+
+    stripped = [chr(code) for code in range(0x110000) if chr(code).isspace()]
+    assert len(stripped) > 20, "the surface, not a hand-picked list"
+
+    for char in stripped:
+        padded = char + base + char
+        guard_query(padded)  # accepted → this statement will be executed
+        assert statement_identity(padded) == identity, repr(char)

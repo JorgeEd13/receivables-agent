@@ -13,7 +13,7 @@ import datetime as dt
 import json
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 import duckdb
 from chromadb.api.models.Collection import Collection
@@ -22,11 +22,55 @@ from pydantic import BaseModel, Field
 
 from src.agent.ledger import run_query
 from src.agent.schema_hints import SCHEMA_HINTS
-from src.agent.sql_guard import GuardrailError, guard_query, strip_wrapper_line_echo
+from src.agent.sql_guard import (
+    GuardrailError,
+    guard_query,
+    statement_identity,
+    strip_wrapper_line_echo,
+)
+from src.agent.turn_control import ArgKey, text_arg_key
 
-# A tool wrapper (see ``src.agent.turn_control.ToolCallTracker.wrap``): decorates a
-# tool's callable to dedup repeats + record the turn's calls. ``None`` = unwrapped.
-ToolWrap = Callable[[str, Callable[..., str]], Callable[..., str]]
+
+class ToolWrap(Protocol):
+    """A tool wrapper — see ``src.agent.turn_control.ToolCallTracker.wrap``.
+
+    Decorates a tool's callable to dedup repeats + record the turn's calls;
+    ``None`` in place of one leaves the tool bare. It is a Protocol rather than a
+    ``Callable`` alias because the SQL tool passes ``key=``: how two calls are
+    compared belongs to whoever knows what the argument *is*.
+    """
+
+    def __call__(
+        self,
+        name: str,
+        func: Callable[..., str],
+        *,
+        key: ArgKey | None = ...,
+    ) -> Callable[..., str]: ...
+
+
+def _sql_dedup_key(args: dict[str, Any]) -> str:
+    """Identify a ``query_ledger`` call by the statement, not by its text.
+
+    Dedup exists to stop a looping tiny model paying twice for the *same* query,
+    so the comparison has to mean "the same query" — and only the parser can say
+    that. `statement_identity` returns the syntax tree, which ignores indentation,
+    keyword case, comments and a trailing `;` while separating anything that
+    differs inside a string literal. The text key it replaced (2026-08-01) did the
+    opposite at the boundary: it collapsed whitespace *inside* literals, so
+    ``name = 'John  Doe'`` and ``name = 'John Doe'`` deduped into one query.
+
+    Text is the fallback when the SQL does not parse: such a statement is rejected
+    by the guard and never runs, so merging two of them only saves the model a step
+    it was wasting anyway. The prefix keeps the two namespaces apart, so a tree key
+    can never collide with the text of some other call.
+    """
+    sql = args.get("sql")
+    identity = statement_identity(sql) if isinstance(sql, str) else None
+    if identity is None:
+        return "text:" + text_arg_key(args)
+    return "tree:" + json.dumps({**args, "sql": identity}, sort_keys=True, default=str)
+
 
 _TOOL_DESCRIPTION = (
     "Run a single read-only DuckDB SELECT against the receivables ledger and "
@@ -90,7 +134,7 @@ def make_query_ledger_tool(
             default=str,
         )
 
-    func = wrap("query_ledger", query_ledger) if wrap else query_ledger
+    func = wrap("query_ledger", query_ledger, key=_sql_dedup_key) if wrap else query_ledger
     return StructuredTool.from_function(
         func=func,
         name="query_ledger",

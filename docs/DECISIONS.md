@@ -555,6 +555,65 @@ the two tools in `build_agent` and driven by `CachedAgent`:
 - Strong/cloud models are unaffected — they rarely loop, and dedup only fires on a
   genuine exact repeat.
 
+### Amendment 2026-08-01 — "different literals never collide" was false, and the isolation had no test
+
+Point 1 above claimed the arguments were "normalized only for whitespace — case
+preserved, so different literals never collide". The second half was wrong. The
+collapse ran over the whole string, so it reached **inside** string literals:
+`WHERE name = 'John  Doe'` and `WHERE name = 'John Doe'` produced one key, and the
+second query — a different question about a different customer — never ran and was
+handed the first one's rows plus the nudge *"you already ran this exact call"*
+(measured 2026-07-31). A dedup key that merges two questions doesn't waste a step;
+it answers one of them with the wrong data.
+
+`query_ledger` now keys on the **statement**, not on its text.
+`sql_guard.statement_identity` returns the tree DuckDB parses
+(`json_serialize_sql`, byte offsets dropped), so indentation, keyword case, a
+comment and a trailing `;` still dedup, while anything that differs inside a
+literal separates — the same principle as ADR-022: *ask the parser, don't model the
+language in text*. Three deliberate boundaries:
+
+- **The tracker stays language-agnostic.** `wrap(..., key=)` is supplied by the tool
+  that knows what its argument is (`tools.py`); tools taking prose keep the text
+  key, where collapsing whitespace changes nothing a reader means.
+- **Unparseable SQL falls back to text.** It has no tree, and the guard refuses it,
+  so it never reaches the ledger; merging two of them only spares the model a step
+  it was wasting. The two key spaces are prefixed (`tree:` / `text:`) because
+  without that a caller can pass a tree as its `sql` and be served another call's
+  memo — constructible, and now tested.
+- **It errs toward separating.** The tree keeps identifiers as typed, so
+  `FROM customers` and `FROM CUSTOMERS` are two identities. That costs one repeated
+  call; the opposite error costs a caller someone else's rows.
+
+Point 3's concurrency claim was true but **unowned**: swapping the `ContextVar` for
+a module global kept the whole suite green, because the only isolation test ran
+turns in sequence, which a global also passes.
+`test_interleaved_turns_do_not_cross_contaminate` now runs two turns through
+`asyncio.gather`, opening both before either calls a tool, and checks the memo
+*and* the observation log.
+
+The isolation is per **asyncio context**, and the ADR now says so: `begin()` writes
+into the caller's context rather than creating one, so requests are isolated
+because the ASGI server gives each its own task. Two turns driven from the same
+task share a state. Not reachable over HTTP, and not a code change — but
+"concurrent requests never cross-contaminate" without that sentence claims more
+than the mechanism delivers.
+
+One more hole came from an attack on this change rather than from reading it: the
+guard parses `sql.strip()` while `statement_identity` parsed the raw text, so a
+leading `\x0b` — whitespace to Python, a parse error to DuckDB — made the identity
+return "no opinion" for a statement the guard happily executed, and the text key
+came back through that crack, literal collision included. The strip now has one
+owner (`_statement_text`), used by both, and the invariant *"anything the guard
+runs can be identified"* is tested against every character Python's `str.strip()`
+removes, derived from the language rather than listed by hand.
+
+Suite **374 → 382**. Fourteen mutations of this code — four of them relaxations
+(lower-casing the SQL before keying, collapsing whitespace before keying, an empty
+identity for unparseable text, a fallback that ignores the arguments) — leave
+thirteen red. The one that stays green moves the shared strip for *both* callers
+at once, which is the single-owner property working, not a gap.
+
 ---
 
 ## ADR-013 — Tiny-model prompt, firm tool-routing, and a low recursion cap

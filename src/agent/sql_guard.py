@@ -292,6 +292,52 @@ def _syntax_tree(sql: str) -> dict[str, Any]:
     return tree
 
 
+def _statement_text(sql: str) -> str:
+    """The exact text handed to the parser — the one owner of that decision.
+
+    It exists because there are now two entry points that must agree on it
+    (`guard_query` and `statement_identity`), and a second copy of `.strip()` is a
+    second thing to keep in step. Measured 2026-08-01, before this was shared: with
+    `statement_identity` reading the raw text, a leading `\\x0b` made it return "no
+    opinion" while the guard stripped the same character and ran the statement — so
+    a query that *executed* fell back to the text key, restoring the literal
+    collision the tree key exists to prevent.
+    """
+    return sql.strip()
+
+
+def statement_identity(sql: str) -> str | None:
+    """A canonical identity for `sql`, or `None` when it is not a parseable SELECT.
+
+    Two texts get the same identity **iff DuckDB parses them into the same
+    statement**: indentation, keyword case, comments and a trailing separator are
+    lexical noise that never reaches the tree, while anything inside a string
+    literal does reach it and therefore separates. `query_location` (a byte offset
+    into the text the tree came from) is dropped for the same reason it is dropped
+    in `_canonical_statement` — it moves with whitespace even though the statement
+    did not.
+
+    This exists because callers outside the guard need to ask *"is this the same
+    query I already ran?"*, and the only honest answer comes from the parser. A
+    text comparison, however normalized, either separates statements that are the
+    same or — worse, measured 2026-07-31 — merges statements that differ only
+    inside a literal. `None` means "no opinion": the caller falls back to text,
+    which is safe precisely because a statement that does not parse never runs.
+
+    It errs on the side of *separating*: the tree keeps identifiers as they were
+    typed, so `FROM customers` and `FROM CUSTOMERS` — the same relation to the
+    binder — get different identities (measured 2026-08-01). For a dedup caller
+    that costs one repeated call; the opposite error costs a caller the wrong
+    rows, so the asymmetry is deliberate. It is not a normalizer for anything that
+    needs semantic equality.
+    """
+    try:
+        tree = _syntax_tree(_statement_text(sql))
+    except GuardrailError:
+        return None
+    return json.dumps(_without_locations(tree), sort_keys=True, default=str)
+
+
 def _without_locations(node: Any) -> Any:
     """Copy of `node` with every `query_location` dropped.
 

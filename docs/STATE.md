@@ -233,6 +233,13 @@ tests instead of the code, **4 of 6** mutations stay green.
 > (`assets/logo.png`). Note what is actually live there: `space/main` predates ADR-022 entirely,
 > so the demo runs the **string scanner**, not the parser-based guard — the catalog hole fixed
 > above is the smaller of the two gaps.
+>
+> **Re-measured 2026-08-01 (`git rev-list --count space/main..HEAD`): 69 before this session's
+> commit, 70 with it** — counted, not incremented by hand, which is why it does not line up with
+> the run-up above (that count stopped being maintained after `R1-C9`). New in kind: `R1-C12`
+> changes **runtime behaviour** (the dedup key), so the live demo is no longer behind only on
+> tests and docs — there, two questions differing inside a string literal still collapse into
+> one, and the second is answered with the first's rows.
 
 > ⚠️ **Verification lesson from this session, worth more than the fix.** The lint gate was
 > reported green locally and failed in CI minutes later. The check was
@@ -624,6 +631,46 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > assertion is redundant defence for the other two; and retrieval **ranking** is not measured
 > offline at all, since the deterministic embedding only stands in for MiniLM. Details in
 > **ADR-009 Amendment 2026-07-31**.
+>
+> **2026-08-01 (`R1-C12`) — the dedup key told the model it had already asked a question it
+> hadn't, and turn isolation had no owner. Both closed (374 → 382).**
+> A line-by-line audit of `turn_control.py` on 2026-07-31 measured **20 mutations, 7 green**.
+> Two of the findings were not cleanup:
+> 1. **The dedup key merged different queries.** `_arg_key` collapsed whitespace across the
+>    whole string, literals included, so `WHERE name = 'John  Doe'` and `WHERE name = 'John
+>    Doe'` shared a key: the second never ran and was served the first's rows with *"you already
+>    ran this exact call"*. `ADR-014` stated the opposite ("different literals never collide").
+>    `query_ledger` now keys on the parse tree (`sql_guard.statement_identity`), chosen at the
+>    construction site via `wrap(..., key=)`; prose tools keep the text key; unparseable SQL
+>    falls back to text under a separate prefix, because a tree handed back as the `sql`
+>    argument would otherwise be served another call's memo.
+> 2. **Turn isolation was claimed and untested.** Replacing the `ContextVar` with a module
+>    global left the suite at **374 green** while two interleaved turns read each other's state
+>    — the only isolation test ran turns in *sequence*, which a global also passes.
+>
+> **12 of 12 mutations of this code are now red**, the four relaxations included (lower-case
+> the SQL before keying · collapse whitespace before keying · empty identity instead of "no
+> opinion" · a fallback key that ignores the arguments). Three of those twelve were **green
+> until the tests that close them were written this session** — they were found by mutating,
+> not by reading. Honest counterpart: **all 7 single-assertion weakenings of the new tests pass
+> green on their own**; what changed since `R1-T4` is that no *pair* (weakened assertion + the
+> code mutation it should own) opens a hole — each guarantee has at least two owners.
+> The concurrency test earns that only because it opens both turns before either calls a tool:
+> with the simpler ordering, one assertion was the sole owner.
+>
+> **Then an instance with no knowledge of the design attacked the fix and found a third hole,
+> in the fix itself.** `guard_query` parses `sql.strip()`; `statement_identity` parsed the raw
+> text. A leading `\x0b` — whitespace to Python, a parse error to DuckDB — made the identity
+> answer "no opinion" for a statement the guard **stripped and executed**, so that query fell
+> back to the text key and the literal collision returned through the crack. The strip now has
+> one owner (`_statement_text`) used by both, and the invariant *anything the guard runs can be
+> identified* is asserted against **every character Python's `str.strip()` removes**, derived
+> from the language rather than listed (a hand-picked list of three is itself caught, by the
+> count anchor). Same session, same family as the original defect: **two copies of one
+> normalization**. It also re-scoped a claim rather than code — turn isolation is per **asyncio
+> context**, so two turns driven from one task share state; unreachable over HTTP, now written
+> down instead of implied. Suite **380 → 382**; 14 code mutations, 13 red. Details in
+> **ADR-014 Amendment 2026-08-01**.
 
 ## Done
 - 2026-07-02: **Phase 6 Layer 2 — grammar-constrained tool-calls (ADR-011).**

@@ -11,6 +11,10 @@ the first two; narration arrived with slice 2.)
   returns the *memoized* result plus a firm nudge ("you already have this — answer
   now"), instead of re-executing. This doesn't lower the step count, but it stops
   the loop paying for the same query twice and pushes the model to finalize.
+  What counts as "identical" is the wrapped tool's business: a tool whose argument
+  is *code* passes a ``key`` that asks the parser (``query_ledger`` keys on the
+  syntax tree, ``tools.py``), because text normalization cannot tell a cosmetic
+  rewrite from a different literal. Tools that take prose keep the text key.
 
 * **Forced finalization (8.1 + 8.3).** The tracker also records every
   ``(tool, args, result)`` of the turn, so when the loop still hits the step
@@ -27,12 +31,22 @@ the first two; narration arrived with slice 2.)
 
 Turn state lives in a ``ContextVar`` so concurrent requests against the single
 shared agent (built once into ``app.state``) never cross-contaminate: each turn
-calls ``begin()`` to install a fresh state in its own context, and the wrapped
-tools read/mutate whatever state is current. **That isolation is load-bearing and
-currently untested** (measured 2026-07-31: swapping the ``ContextVar`` for a module
-global keeps the whole suite green, while two interleaved turns then read each
-other's rows) — the existing test covers *sequential* turns, which a global also
-passes. See `docs/STATE.md`.
+calls ``begin()`` to install a fresh state, and the wrapped tools read/mutate
+whatever state is current. That isolation is load-bearing, and until 2026-08-01
+it was **untested**: swapping the ``ContextVar`` for a module global kept the
+whole suite green while two interleaved turns read each other's rows, because the
+only isolation test ran turns in *sequence*, which a global also passes.
+``test_interleaved_turns_do_not_cross_contaminate`` now runs two turns
+concurrently through ``asyncio.gather`` and is the owner of this paragraph.
+
+**The unit of isolation is the asyncio context, not the call.** ``begin()`` writes
+into the *caller's* context; it does not create one. Requests are isolated because
+the ASGI server runs each in its own task and a task starts from a copy of the
+context — not because anything here forces it. Two turns driven from the *same*
+task (``await agent.ainvoke(...)`` twice, interleaved by hand) share one state.
+That was found by attacking this file on 2026-08-01 and is unreachable through the
+HTTP surface; it is written down because "never cross-contaminate" without this
+sentence is a promise wider than the mechanism.
 
 The 8.4 "continue" affordance is met by the API's existing full-history-per-turn
 contract (a follow-up already carries prior context) plus finalization's narrowed
@@ -47,6 +61,10 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
+
+# How a tool's arguments become the identity used for dedup. The default is text
+# (`text_arg_key`); a tool whose arguments are code supplies its own (see `tools.py`).
+ArgKey = Callable[[dict[str, Any]], str]
 
 # The nudge appended to a de-duplicated tool result. Terse and imperative — a tiny
 # model follows one firm instruction better than a paragraph (ADR-013).
@@ -76,21 +94,22 @@ class _TurnState:
 _TURN: ContextVar[_TurnState | None] = ContextVar("receivables_turn_state", default=None)
 
 
-def _arg_key(args: dict[str, Any]) -> str:
-    """A stable dedup key for a tool call's arguments.
+def text_arg_key(args: dict[str, Any]) -> str:
+    """The default dedup key for a tool call's arguments: normalized text.
 
     Whitespace in string args is collapsed and trimmed so cosmetically-different
-    but identical calls (a re-emitted SQL with different indentation) still match.
-    Case is preserved, so `'OPEN'` and `'open'` stay distinct.
+    but identical calls still match. Case is preserved.
 
-    **Known limitation (measured 2026-07-31).** Collapsing whitespace is applied to
-    the *whole* string, so it reaches **inside** string literals too:
-    ``WHERE name = 'John  Doe'`` and ``WHERE name = 'John Doe'`` produce the same
-    key, and the second — a genuinely different query — is served the first one's
-    rows plus a "you already ran this exact call" note. An earlier version of this
-    docstring claimed different literals could never collide; that was wrong. The
-    correct key for `query_ledger` is the **parse tree** the guard already builds
-    (`json_serialize_sql`), not the text; see `docs/STATE.md`.
+    **This key is only honest for arguments that are prose** (`search_policy`'s
+    question), where collapsing whitespace changes nothing a reader means. It is
+    *wrong* for arguments that are code, because the collapse reaches **inside**
+    string literals: until 2026-08-01 `query_ledger` used this key, and
+    ``WHERE name = 'John  Doe'`` and ``WHERE name = 'John Doe'`` produced the same
+    one — the second query never ran and was served the first's rows plus a "you
+    already ran this exact call" note (measured 2026-07-31). A tool whose argument
+    is code passes its own ``key=`` to `ToolCallTracker.wrap` instead; the SQL one
+    keys on the parse tree (`sql_guard.statement_identity`), which is the only
+    comparison that cannot mistake a rewrite for a different statement.
     """
     normalized = {
         k: " ".join(v.split()) if isinstance(v, str) else v for k, v in args.items()
@@ -126,13 +145,27 @@ class ToolCallTracker:
         state = _TURN.get()
         return list(state.observations) if state is not None else []
 
-    def wrap(self, name: str, func: Callable[..., str]) -> Callable[..., str]:
+    def wrap(
+        self,
+        name: str,
+        func: Callable[..., str],
+        *,
+        key: ArgKey | None = None,
+    ) -> Callable[..., str]:
         """Decorate a tool's callable with dedup + observation recording.
+
+        ``key`` builds the identity of a call's arguments; it defaults to
+        normalized text (`text_arg_key`). A tool whose arguments are code passes its
+        own — the tracker deliberately knows nothing about SQL, and the tool that
+        owns the language is the one that can say when two calls are the same.
+        The tool *name* is always part of the key, so two tools that happen to
+        share an argument name never share a memo entry.
 
         Outside a tracked turn (no ``begin`` — e.g. a direct unit test of a tool)
         the wrapper is a transparent pass-through, so tools stay independently
         testable.
         """
+        arg_key = key or text_arg_key
 
         @functools.wraps(func)
         def wrapped(**kwargs: Any) -> str:
@@ -140,13 +173,13 @@ class ToolCallTracker:
             if state is None:
                 return func(**kwargs)
 
-            key = (name, _arg_key(kwargs))
-            if key in state.memo:
+            memo_key = (name, arg_key(kwargs))
+            if memo_key in state.memo:
                 # A redundant call: return the prior result + a nudge, don't re-run.
-                return _with_nudge(state.memo[key])
+                return _with_nudge(state.memo[memo_key])
 
             result = func(**kwargs)
-            state.memo[key] = result
+            state.memo[memo_key] = result
             state.observations.append(Observation(name, dict(kwargs), result))
             return result
 
