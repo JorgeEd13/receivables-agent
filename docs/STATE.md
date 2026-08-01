@@ -823,6 +823,22 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
   the copies — while the duplication lasts, the evals can silently measure stale
   behavior if the canonical helpers change. Bonus while there: make `final_text`
   filter content blocks by `type == "text"`.
+- **Cleanup, low priority (queued 2026-07-31, turn-control pass):** five small items in
+  `src/agent/turn_control.py` / `tests/test_turn_control.py`, none of them a guarantee
+  hole — each was measured to leave the suite fully green.
+  - `finalize_answer(observations, question=None)` — the `question` parameter is **never
+    read**. It was a hook for question-aware finalization that was not built. Either use it
+    or drop it from the signature and from `CachedAgent._finalized`.
+  - `_render_ledger` previews `rows[:5]`, but no fixture has more than five rows, so the
+    slice has no owner (changing it to 50 stays green). Add a fixture that actually
+    truncates and assert the `(showing 5 of N rows)` note.
+  - `narrate_start` drops the `query.strip()` emptiness check with no test noticing — a
+    whitespace-only query would render `on “”`. Cosmetic; pin it or simplify it.
+  - `@functools.wraps` on `ToolCallTracker.wrap` is currently **redundant defense**:
+    `tools.py` passes `args_schema` explicitly, so nothing depends on signature inference.
+    Keep it, but the note is here so a future reader doesn't mistake it for load-bearing.
+  - `tests/test_turn_control.py` defines `_NoCache` **three times** (two local, one module
+    level, only one of which has `warm`). Collapse into one fixture.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes

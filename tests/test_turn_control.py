@@ -1,8 +1,15 @@
 """Offline tests for the tiny-model turn control (Phase 8, ADR-014).
 
-Covers the two seams that make a ceiling-hitting tiny model degrade gracefully:
-dedup / redundant-call short-circuit (8.2) and forced finalization (8.1 + 8.3).
-No LLM, no network — pure functions over a tracker and JSON tool results.
+Covers the three seams that make a ceiling-hitting tiny model degrade gracefully:
+dedup / redundant-call short-circuit (8.2), forced finalization (8.1 + 8.3) and
+progress narration + the wall-clock budget (8.5, exercised end-to-end through
+``CachedAgent``). No LLM, no network — pure functions over a tracker and JSON tool
+results.
+
+Known gaps (measured 2026-07-31, queued in `docs/STATE.md`): the ``ContextVar``
+turn isolation is only covered *sequentially*, so a module-global implementation
+would pass everything here; and the dedup key's whitespace normalization reaches
+inside string literals, which no case here distinguishes.
 """
 
 from __future__ import annotations

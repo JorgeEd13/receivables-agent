@@ -1,8 +1,9 @@
 """Turn-scoped control for the tiny-model ReAct loop (Phase 8, ADR-014).
 
-Two seams that make a tiny model on a free CPU **degrade gracefully** instead of
+Three seams that make a tiny model on a free CPU **degrade gracefully** instead of
 thrashing then apologizing. They *improve* the ADR-013 ceiling (a low step cap +
-a graceful `GraphRecursionError` catch); they do not replace it.
+a graceful `GraphRecursionError` catch); they do not replace it. (Slice 1 shipped
+the first two; narration arrived with slice 2.)
 
 * **Dedup / redundant-call short-circuit (8.2).** A tiny model tends to re-issue
   the *same* tool call — burning its small step budget on work it already did.
@@ -27,7 +28,11 @@ a graceful `GraphRecursionError` catch); they do not replace it.
 Turn state lives in a ``ContextVar`` so concurrent requests against the single
 shared agent (built once into ``app.state``) never cross-contaminate: each turn
 calls ``begin()`` to install a fresh state in its own context, and the wrapped
-tools read/mutate whatever state is current.
+tools read/mutate whatever state is current. **That isolation is load-bearing and
+currently untested** (measured 2026-07-31: swapping the ``ContextVar`` for a module
+global keeps the whole suite green, while two interleaved turns then read each
+other's rows) — the existing test covers *sequential* turns, which a global also
+passes. See `docs/STATE.md`.
 
 The 8.4 "continue" affordance is met by the API's existing full-history-per-turn
 contract (a follow-up already carries prior context) plus finalization's narrowed
@@ -76,8 +81,16 @@ def _arg_key(args: dict[str, Any]) -> str:
 
     Whitespace in string args is collapsed and trimmed so cosmetically-different
     but identical calls (a re-emitted SQL with different indentation) still match.
-    Conservative on purpose: case is preserved, so different string *literals*
-    never collide — we only short-circuit a genuine repeat.
+    Case is preserved, so `'OPEN'` and `'open'` stay distinct.
+
+    **Known limitation (measured 2026-07-31).** Collapsing whitespace is applied to
+    the *whole* string, so it reaches **inside** string literals too:
+    ``WHERE name = 'John  Doe'`` and ``WHERE name = 'John Doe'`` produce the same
+    key, and the second — a genuinely different query — is served the first one's
+    rows plus a "you already ran this exact call" note. An earlier version of this
+    docstring claimed different literals could never collide; that was wrong. The
+    correct key for `query_ledger` is the **parse tree** the guard already builds
+    (`json_serialize_sql`), not the text; see `docs/STATE.md`.
     """
     normalized = {
         k: " ".join(v.split()) if isinstance(v, str) else v for k, v in args.items()
