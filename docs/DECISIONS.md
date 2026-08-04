@@ -1131,6 +1131,121 @@ same plan**, so there is no rival for the margin to find. The rule behaves exact
 and the answer is still to the wrong question. Fixing *that* is not a threshold problem; it needs
 the model, which is the thing the cache exists to skip.
 
+### Amendment 2026-08-01 (`R1-C14`) — the fall-through was written down, never tested, and narrower than it needed to be
+
+Point 2 above ends on *"If a cached query no longer validates or runs (`ReplayError`), the caller
+falls through to the LLM."* True of the code, and **owned by nothing**: replacing that entire
+clause in `CachedAgent._try_cache` with `raise` left the suite at **396 passed**. Tests existed
+for `ReplayError` being *raised* — `replay_plan` called directly — and none for what the wrapper
+*does* with it. Testing the part is not testing the seam.
+
+The sibling hole needed no mutation to be real. The cache is **persistent and outlives the code
+that wrote it** (the demo image ships a seeded collection; a long-running Space keeps warming
+one), so a stored document in a shape this version no longer writes is an ordinary event.
+`Plan.from_json` answered it with `JSONDecodeError`, `KeyError`, `TypeError` — and, one layer
+down at replay time, `AttributeError` from an `args` that was not a dict — none of which is a
+`ReplayError`. Measured out of **all three** entry points; `astream`'s own `except Exception` does
+not cover it, because the cache lookup happens *before* that `try`.
+
+**Decision — the promise is restated one level up, where it is actually needed:**
+
+> No failure of any cache operation — lookup, replay or warm — can turn a turn into an error the
+> visitor sees.
+
+Three changes, at three layers, each with its own owner:
+
+1. **`Plan.from_json` is total**: a `Plan` or a `PlanFormatError`, nothing else. Validating
+   `args` here is what closes the `AttributeError` at its source — `plan_from_messages` already
+   refuses a non-dict `args` on the way in, and deserialization is the *other* way in.
+2. **An unreadable entry is "no plan", not an exception** (`_plan_at`), logged at WARNING —
+   degrading quietly is right for the turn and wrong forever, since an entry no version can read
+   makes that one question permanently slow with nothing saying why.
+3. **`_try_cache` and `_warm` keep a backstop**, deliberately in *two* clauses. `ReplayError` is
+   the contract (INFO); the catch-all is the admission that no list of exception types stays
+   complete (WARNING + traceback). They are not redundant defence dressed as two: the log level
+   is what makes them separately deletable-and-noticed. `_warm`'s is the load-bearing one — it
+   runs *after* the model answered, so a failure there discards work the visitor already waited
+   for, to protect a speed-up for the next visitor.
+
+**Suite 396 → 423**, in `tests/test_cache_degradation.py`. Two of its instruments are worth
+naming, because a list would have failed here exactly as it failed in the code: the malformed
+documents are **generated** from a grid of JSON types × positions rather than enumerated, and the
+seams that get fault-injected are **derived from the module's own namespace** and compared by
+equality, so a new helper imported from `plan_cache` turns the anchor red before the degradation
+test can silently stop covering it.
+
+**Mutations: 21 in the code, 19 red — including all 8 that RELAX** (the catch-all narrowed to the
+two exception types this amendment's own bug report named; `from_json` accepting a non-dict
+`args`, a non-str `tool`, a non-list document, a non-object step; `_warm` narrowed to `TypeError`;
+the rival test back to its fail-open spelling). The two greens are honest: moving
+`_replay_as_messages` out of the `try` (it cannot fail) and, before it was given an assertion,
+the unreadable-entry log. **9 test-side mutations, 7 stay green; 6 crossed pairs, 2 become holes**
+— both of them single-owner assertions, which is what single ownership *means* rather than a
+defect.
+
+**Then a blind pass attacked this fix and broke it in two of three claims.**
+
+1. **`Plan.from_json` was not total.** `except json.JSONDecodeError` reads correct and is not:
+   measured on the installed CPython, a number past the 4300-digit conversion limit raises a bare
+   **`ValueError`** and deep nesting raises **`RecursionError`**, which is not even a `ValueError`.
+   Worse, `PlanFormatError` *subclasses* `ValueError` rather than the reverse, so `_plan_at`'s
+   `except PlanFormatError` let a real `ValueError` straight through and out of `lookup`. This is
+   the enumerated-guard failure one layer below where it was just fixed — enumerating what a
+   parser can throw is the same mistake as enumerating what an attacker can type. Now a catch-all
+   re-raised as `PlanFormatError`, owned by a test that builds its payloads *from the interpreter
+   limits themselves* and asserts the three break `json.loads` in three **different** ways.
+2. **`_NEIGHBOURS_SCANNED = 32` was silently answering a correctness question.** It is a cost
+   ceiling, but when every fetched neighbour sat inside the margin the loop merely **ran out of
+   rows** and served the winner — so a genuine rival at rank 32 was never examined. A stopped scan
+   is not a finished one: `lookup` now distinguishes *left the window* from *ran out*, and misses
+   in the second case when the collection holds more than was fetched. Amends the paragraph above
+   which called the bound "a ceiling on how many same-plan near-duplicates can hide a rival, not a
+   limit on the check" — it was a limit on the check.
+3. **The third break was a claim of mine that was too strong, not a defect.** The blind instance
+   was told `lookup` never serves a plan when a different plan sits inside the margin, and
+   produced a counter-example: the **exact-question shortcut**. That shortcut is deliberate,
+   load-bearing and documented two sections up — a question that *is* a stored question (modulo
+   whitespace and case) is answered by key, not by geometry. The correct statement carries the
+   qualifier: *on the semantic path*. The claim was narrowed; no code changed.
+
+**Then a claim audit ran the eleven statements above and one was overstated.** *"An unreadable
+entry is a miss, never a raise"* held for nine metadata shapes and failed on the tenth: a **truthy
+non-mapping** row entry (a list) walked past `row[index] or {}` and died on `.get`. Outside
+ChromaDB's declared contract — which is the point, since `_plan_at` exists so that a turn does not
+depend on that contract holding, and `CachedAgent`'s backstop would have swallowed it, which is
+how a hole like this stays invisible. Fixed with `isinstance`, owned by a test that walks ten
+shapes plus a readable control. **Suite 423 → 424.**
+
+**A second blind pass, run against the repaired code, broke it twice more (424 → 429).** Both
+holes were inside this amendment's own work, which is the result worth keeping:
+
+* **The claim's first statement was outside its own `try`.** `_try_cache` and `_warm` read the
+  question *before* the block that makes the cache incapable of failing a turn — and
+  `astream` reads it a third time, outside everything. A LangGraph-native message object has no
+  `.get`; the unwrapped agent handles it, the cache wrapper raised `AttributeError` out of all
+  three entry points, and on `astream` the stream yielded **nothing at all** — not even the
+  `error` event. Fixed where it belongs: `_last_user_message` is now total for any sequence, one
+  owner for four call sites, rather than three `try` blocks each remembering to be wide enough.
+* **The normalisation had two copies again — the ADR-014 defect, one layer up.** `_same_question`
+  folded whitespace and case while `warm` keyed rows by the **raw** text, so two spellings of one
+  question were two rows for storage and one question for the shortcut. Two rows a trailing space
+  apart sit at distance **0.0000** — no embedder separates them — the shortcut fired on whichever
+  ChromaDB ranked first, and the ambiguity check never ran: not a slow answer, a *different plan*
+  under the "the numbers are current" seal. `_question_key` is now the single owner and `warm`
+  keys by it, so one question is one row. The reader stops assuming that invariant too: a
+  collection **seeded by an older version** can still hold the duplicate, so the shortcut confirms
+  that same-key rows agree and treats a legacy conflict as ambiguity.
+
+Note what that second one costs elsewhere: a row's ID is no longer readable text, so
+`test_plan_routing` resolves IDs back through `_question_key` instead of assuming the ID *is* the
+question.
+
+Three things are still green, and are limits rather than gaps: `>=` vs `>` on the window (no
+measured gap lands exactly on the margin); the `neighbour_distance is None` branch, which the
+ChromaDB call cannot currently produce; and — deliberately — `BaseException`. `KeyboardInterrupt`
+and `CancelledError` escape both backstops on purpose: a cancelled request is not a cache failure
+to be degraded around, and swallowing it would be the bug.
+
 ## ADR-008 — AI-native layer: shared-guardrail MCP server + property-based evals
 
 **Status:** Accepted · 2026-06-08

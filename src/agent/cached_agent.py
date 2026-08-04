@@ -21,6 +21,7 @@ number is current even after the ledger changes.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
@@ -39,6 +40,8 @@ from src.agent.turn_control import (
     narrate_end,
     narrate_start,
 )
+
+logger = logging.getLogger(__name__)
 
 # Streaming event vocabulary (see `astream`): the API turns each dict into one SSE
 # event so the UI can show live progress. Kept tiny and stable.
@@ -62,8 +65,24 @@ def _tool_output_text(output: Any) -> str | None:
 
 
 def _last_user_message(messages: list[dict[str, Any]]) -> str | None:
-    """The content of the final user turn in the request, if any."""
+    """The content of the final user turn in the request, if any.
+
+    **Total for any sequence**, and that is the point rather than defensiveness:
+    this is the first statement of the cache path and it is called from four
+    places, three of them outside the backstops that were supposed to make the
+    cache incapable of failing a turn. A blind pass walked in through exactly
+    that gap on 2026-08-01 with LangGraph-native message objects — which have no
+    ``.get``, which the wrapped agent handles perfectly well, and which turned
+    the turn into an ``AttributeError`` out of all three entry points (on
+    ``astream``, into a stream that yielded *nothing at all*).
+
+    A shape we cannot read means "no question", which costs a cache lookup and
+    nothing else. Teaching this function to *understand* other message types
+    would be a feature; refusing to crash on them is the contract.
+    """
     for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
         if msg.get("role") == "user":
             content = msg.get("content")
             return content if isinstance(content, str) else None
@@ -319,13 +338,13 @@ class CachedAgent:
         shape, different question — which is the failure this method's "is safe"
         used to gloss over.
         """
-        question = _last_user_message(messages)
-        if not question:
-            return None
-        plan = self._cache.lookup(question)
-        if plan is None:
-            return None
         try:
+            question = _last_user_message(messages)
+            if not question:
+                return None
+            plan = self._cache.lookup(question)
+            if plan is None:
+                return None
             result = replay_plan(
                 plan,
                 self._con,
@@ -333,19 +352,48 @@ class CachedAgent:
                 max_rows=self._max_rows,
                 search_k=self._search_k,
             )
-        except ReplayError:
-            return None  # can't reproduce safely → fall through to the LLM
-        return _replay_as_messages(messages, result)
+            return _replay_as_messages(messages, result)
+        except ReplayError as exc:
+            # The designed degradation (ADR-009 Decision-2): the cached SQL no
+            # longer validates or no longer runs. Expected, not a defect — the
+            # visitor waits for the model instead of reading an error.
+            logger.info("plan-cache: replay abandoned, falling through to the LLM: %s", exc)
+            return None
+        except Exception:
+            # Anything else the cache path can do is *also* only worth a slower
+            # answer. The two clauses are deliberately separate: the one above is
+            # the contract, this one is the admission that no list of exception
+            # types stays complete — the cache is an optimisation, and an
+            # optimisation that can 500 the turn is not one. Logged loudly
+            # because reaching here is a bug, unlike the clause above.
+            logger.warning(
+                "plan-cache: lookup/replay failed, falling through to the LLM",
+                exc_info=True,
+            )
+            return None
 
     def _warm(
         self, inbound: list[dict[str, Any]], out_messages: list[Any]
     ) -> None:
-        """Extract a cacheable plan from a finished turn and store it."""
-        if len(inbound) != 1:
-            return
-        question = _last_user_message(inbound)
-        if not question:
-            return
-        plan = plan_from_messages(out_messages)
-        if plan is not None:
-            self._cache.warm(question, plan)
+        """Extract a cacheable plan from a finished turn and store it.
+
+        Warming runs **after** the model has already answered, which is what makes
+        the ``except`` load-bearing rather than defensive: a failure here would
+        throw away a reply the visitor waited for, to protect a speed-up for the
+        *next* visitor. Losing the warm costs one slow turn later; letting it
+        raise costs the turn that already succeeded.
+        """
+        try:
+            if len(inbound) != 1:
+                return
+            question = _last_user_message(inbound)
+            if not question:
+                return
+            plan = plan_from_messages(out_messages)
+            if plan is not None:
+                self._cache.warm(question, plan)
+        except Exception:
+            logger.warning(
+                "plan-cache: warming failed; the answer already produced is unaffected",
+                exc_info=True,
+            )

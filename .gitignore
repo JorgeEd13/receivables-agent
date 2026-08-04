@@ -34,3 +34,6 @@ docker-compose.override.yml
 Thumbs.db
 .idea/
 .vscode/
+
+# Blind-adversarial repros and throwaway probes — local only, never shipped.
+scratchpad/

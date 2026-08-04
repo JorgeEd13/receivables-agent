@@ -30,7 +30,12 @@ import chromadb
 import pytest
 from data.curated_plans import curated_plans
 
-from src.agent.plan_cache import AMBIGUITY_MARGIN, PlanCache, get_plan_cache
+from src.agent.plan_cache import (
+    AMBIGUITY_MARGIN,
+    PlanCache,
+    _question_key,
+    get_plan_cache,
+)
 from src.core.config import Settings
 from src.rag.embeddings import default_embedding_function
 
@@ -78,7 +83,7 @@ def cache(curated) -> PlanCache:
 
 
 @pytest.fixture(scope="module")
-def neighbours(cache):
+def neighbours(cache, curated):
     """(question, cosine similarity) for the ``k`` nearest stored questions, read
     from the same collection the cache reads — no second copy of the metric.
 
@@ -87,12 +92,18 @@ def neighbours(cache):
     census would otherwise pay for all 66 pairs instead of the 12 rows they come from.
     """
     memo: dict[tuple[str, int], list[tuple[str, float]]] = {}
+    # A row's ID is the question *key* (`_question_key`), not the text as typed —
+    # that is what makes two spellings of one question one row. The tests below
+    # speak in curated question text, so resolve the ID back through the same
+    # owner rather than assuming the ID is readable text.
+    by_key = {_question_key(q): q for q in curated}
+    assert len(by_key) == len(curated), "two curated questions share one key"
 
     def _neighbours(question: str, k: int = 2) -> list[tuple[str, float]]:
         if (question, k) not in memo:
             result = cache._collection.query(query_texts=[question], n_results=k)
             memo[(question, k)] = [
-                (i, 1.0 - d)
+                (by_key[i], 1.0 - d)
                 for i, d in zip(result["ids"][0], result["distances"][0], strict=True)
             ]
         return memo[(question, k)]

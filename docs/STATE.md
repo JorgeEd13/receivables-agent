@@ -515,8 +515,8 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > **Gotcha:** ChromaDB's in-process store can share state across ephemeral clients, so the
 > test fixture uses a unique collection name per test (a fixed name bled between tests).
 
-> **2026-08-01 — line-by-line audit of the plan-cache engine. Item 1 is now CLOSED (addendum
-> below); items 2 and 3 remain OPEN.** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
+> **2026-08-01 — line-by-line audit of the plan-cache engine. Items 1 and 2 are now CLOSED
+> (addenda below); item 3 remains OPEN.** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
 > put under **43 valid mutations against the suite; 27 stayed green** (plus 6 test-side
 > mutations, all green, and 6 crossed pairs of which 4 leave the suite fully green). Every
 > number below was re-measured by a separate blind pass before being written here.
@@ -606,6 +606,58 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > the wrong N — its neighbourhood is crowded (runner-up 0.0853 behind) but every neighbour in it is
 > another phrasing of the *same* plan, so there is no rival for the margin to find. Details in
 > **ADR-009 Amendment 2026-08-01**.
+
+> **Addendum 2026-08-01 (`R1-C14`) — item 2 closed. A broken cache now costs a slow turn, never
+> an error (396 → 429).**
+> The fall-through the ADR promises in writing had **no owner**: replacing the whole
+> `except ReplayError` clause with `raise` left the suite at 396 passed. The sibling hole needed
+> no mutation at all — the cache is persistent and outlives the code that wrote it, so a stored
+> document in an older shape is ordinary, and `Plan.from_json` answered it with `JSONDecodeError`
+> / `KeyError` / `TypeError`, plus `AttributeError` from a non-dict `args` one layer down at
+> replay. Measured out of **all three** entry points: `astream`'s own `except Exception` never
+> covered it, because the lookup runs *before* that `try`.
+> The promise was restated one level up — **no failure of lookup, replay or warm can turn a turn
+> into an error the visitor sees** — and implemented at three layers with three owners:
+> `Plan.from_json` is **total** (a `Plan` or a `PlanFormatError`); an unreadable entry is "no
+> plan" and logs at WARNING; `_try_cache` / `_warm` keep a backstop in **two** clauses, kept
+> distinguishable by log level so neither can be deleted while the other covers for it. `_warm`'s
+> is the load-bearing one: it runs *after* the model answered, so a raise there discards work the
+> visitor already paid for.
+> **21 code mutations, 19 red — all 8 that RELAX included**; 9 test-side, 7 green; 6 crossed
+> pairs, 2 become holes (both single-owner assertions).
+> ⚔️ **The blind pass then broke this fix in two of three claims.** (1) `from_json` was **not**
+> total: `except json.JSONDecodeError` misses the bare `ValueError` CPython raises past its
+> 4300-digit limit and the `RecursionError` from deep nesting — and since `PlanFormatError`
+> *subclasses* `ValueError`, `_plan_at` let a real `ValueError` out of `lookup`. The
+> enumerated-guard disease one layer below where it had just been fixed. (2) `_NEIGHBOURS_SCANNED
+> = 32` was a **cost** ceiling silently deciding a **correctness** question: when every fetched
+> neighbour sat inside the margin the loop just ran out of rows and served the winner, so a rival
+> at rank 32 was never examined — a stopped scan is not a finished one. Both closed. (3) The third
+> break was **my claim, not the code**: the exact-question shortcut is deliberate and documented,
+> so the guarantee gained its missing qualifier (*on the semantic path*) and nothing changed.
+> ⚔️ **A second blind pass, aimed at the repaired code, broke it twice more** (424 → 429), both
+> inside this session's own work. (1) The claim's **first statement was outside its own `try`** —
+> `_try_cache`, `_warm` and `astream` each read the question before the block that was supposed to
+> make the cache incapable of failing a turn; a LangGraph-native message has no `.get`, so all
+> three entry points raised, and `astream` yielded **nothing at all**, not even an `error` event.
+> `_last_user_message` is now total: one owner for four call sites, instead of three `try` blocks
+> each remembering to be wide enough. (2) **The normalisation had two copies again** — the ADR-014
+> defect one layer up: `_same_question` folded whitespace and case while `warm` keyed rows by the
+> **raw** text, so two spellings of one question were two rows for storage and one question for the
+> shortcut, sitting at distance **0.0000** and resolved by rank. Not a slow answer — a *different
+> plan* under the "numbers are current" seal. `_question_key` is the single owner now, and the
+> reader stops assuming the invariant too (a collection seeded by an older version can still hold
+> the duplicate, so a same-key conflict is treated as ambiguity).
+> 🔎 **And the claim audit caught one overstatement of mine** (423 → 424): *"an unreadable entry
+> is a miss, never a raise"* held for nine metadata shapes and failed on a **truthy non-mapping**
+> row entry, which walked past `row[index] or {}` and died on `.get`. Outside ChromaDB's declared
+> contract — and that is the point, since `_plan_at` exists precisely so a turn need not depend on
+> that contract, and the backstop would have hidden it. Fixed with `isinstance`, owned by a
+> ten-shape test with a readable control.
+> Still green and honest about it: `>=` vs `>` on the window is indistinguishable by construction;
+> the `neighbour_distance is None` branch is unreachable through ChromaDB; and `BaseException`
+> escapes both backstops **on purpose** — a cancelled request is not a cache failure to degrade
+> around, and swallowing it would be the bug.
 
 > **NEXT (needs the notebook — model + normal network):** Layers 2–3 — hardened tiny local
 > LLM (`qwen2.5:0.5b/1.5b` Q4_K_M) with **GBNF grammar-constrained tool-calls** + KV cache;

@@ -50,6 +50,7 @@ Honesty guardrails baked in here:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,6 +59,21 @@ from chromadb.api.models.Collection import Collection
 from chromadb.api.types import EmbeddingFunction
 
 from src.agent.sql_guard import GuardrailError, guard_query
+
+logger = logging.getLogger(__name__)
+
+
+class PlanFormatError(ValueError):
+    """A stored document could not be read back as a plan.
+
+    The cache is **persistent and outlives the code that wrote it**: the demo
+    image ships a seeded collection and a long-running Space keeps warming one.
+    So a stored plan can be a shape this version no longer writes — a legacy
+    serialization, a truncated write, hand-edited metadata. That is *unreadable*,
+    not fatal: the caller treats such an entry as carrying no plan and the turn
+    falls through to the LLM (ADR-009 Amendment 2026-08-01).
+    """
+
 
 # The tools whose calls we know how to replay live. A plan referencing anything
 # else is not cacheable (we can't guarantee we can reproduce it deterministically
@@ -88,20 +104,33 @@ AMBIGUITY_MARGIN: float = 0.10
 _NEIGHBOURS_SCANNED: int = 32
 
 
+def _question_key(question: str) -> str:
+    """The identity of a question: whitespace collapsed, case folded.
+
+    **The single owner, and it has to be the owner of the ID too.** Until
+    2026-08-01 this normalisation lived only in the comparison while ``warm``
+    keyed rows by the *raw* text — so two spellings of one question were two
+    different rows for storage and one identical question for the shortcut. A
+    blind pass built the consequence: two rows a trailing space apart, holding
+    **different plans**, sit at distance 0.0000 from each other (no embedder can
+    separate them), the shortcut fires on whichever ChromaDB ranks first, and the
+    ambiguity check never runs. Exactly the ADR-014 defect — one normalisation,
+    two copies — one layer up, and the docstring here claimed the opposite.
+    """
+    return " ".join(question.split()).casefold()
+
+
 def _same_question(stored_id: str, question: str) -> bool:
     """Whether a stored ID and a typed question are the same question.
 
-    ``warm`` stores the question text as the ID, so this is a **key** comparison,
+    ``warm`` stores the question **key** as the ID, so this is a key comparison,
     not a distance one. It cannot be byte equality: a shipped one-click question
     arrives with a trailing space or a lower-cased first letter often enough, and
     MiniLM places those at distance **0.0000** from the original — measured, when
     this was ``ids[0] == question``, those variants missed the shortcut, tripped
     the margin against a 0.0844 neighbour and fell through to the slow model.
-
-    One owner for the normalisation, applied to both sides here, so the two sides
-    cannot drift apart the way two copies of a ``strip`` did in ADR-014.
     """
-    return " ".join(stored_id.split()).casefold() == " ".join(question.split()).casefold()
+    return _question_key(stored_id) == _question_key(question)
 
 
 @dataclass(frozen=True)
@@ -132,8 +161,50 @@ class Plan:
 
     @classmethod
     def from_json(cls, raw: str) -> Plan:
-        data = json.loads(raw)
-        return cls(steps=tuple(ToolStep(tool=d["tool"], args=d["args"]) for d in data))
+        """Rebuild a plan from ``to_json`` output.
+
+        **Total by construction:** either a ``Plan`` or a ``PlanFormatError``,
+        never a third thing. That is the point — the caller reads bytes it did
+        not write in this process, so "unreadable" has to be one ``except``
+        clause and not a list that grows each time a new corruption is found.
+        Measured before this became a check (2026-08-01): the naive version leaked
+        ``JSONDecodeError`` (broken JSON), ``KeyError`` (a missing key),
+        ``TypeError`` (a scalar or a list of scalars) and — one layer further
+        down, at replay time — ``AttributeError`` from an ``args`` that was not a
+        dict, all the way out of ``invoke`` / ``ainvoke`` / ``astream``.
+
+        Validating ``args`` here is what closes that last one at the source:
+        ``plan_from_messages`` already refuses a non-dict ``args`` on the way in,
+        and this is the *other* way in.
+        """
+        try:
+            data = json.loads(raw)
+        except Exception as exc:
+            # `except json.JSONDecodeError` is the version that reads correct and
+            # is not. Measured on the installed CPython (2026-08-01, blind pass):
+            # a number past the interpreter's 4300-digit conversion limit raises a
+            # bare `ValueError`, and deeply nested brackets raise `RecursionError`,
+            # which is not even a `ValueError`. Both escaped, and because
+            # `PlanFormatError` *subclasses* `ValueError` rather than the other way
+            # round, `_plan_at`'s `except PlanFormatError` did not catch either.
+            # Enumerating what a parser can throw is the same mistake as
+            # enumerating what an attacker can type.
+            raise PlanFormatError(f"stored plan is not readable JSON: {exc}") from exc
+        if not isinstance(data, list):
+            raise PlanFormatError(
+                f"stored plan is not a list of steps (got {type(data).__name__})."
+            )
+        steps: list[ToolStep] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                raise PlanFormatError(
+                    f"plan step is not an object (got {type(entry).__name__})."
+                )
+            tool, args = entry.get("tool"), entry.get("args")
+            if not isinstance(tool, str) or not isinstance(args, dict):
+                raise PlanFormatError(f"plan step is not a tool/args pair: {entry!r}")
+            steps.append(ToolStep(tool=tool, args=args))
+        return cls(steps=tuple(steps))
 
 
 def plan_from_messages(messages: list[Any]) -> Plan | None:
@@ -242,19 +313,44 @@ class PlanCache:
         if plan is None:
             return None
         if _same_question(ids[0], question):
+            # The shortcut rests on an invariant `warm` enforces — one question,
+            # one row — and a **persisted collection outlives the code that wrote
+            # it**, which is the premise of this whole amendment. A collection
+            # seeded before the key was normalised can hold two rows for one
+            # question, at distance 0.0000 from each other, carrying different
+            # plans; resolving that by rank is answering a coin toss. So the
+            # shortcut confirms the invariant instead of assuming it, and legacy
+            # duplicates fall to the LLM like any other ambiguity.
+            for index in range(1, len(ids)):
+                if not _same_question(ids[index], question):
+                    continue
+                if self._plan_at(result, index) != plan:
+                    return None
             return plan
 
         window = distance + self._margin
         for index in range(1, len(ids)):
-            if index >= len(distances):
-                break
-            neighbour_distance = distances[index]
-            if neighbour_distance is None or neighbour_distance >= window:
-                break  # neighbours are ordered: everything left is outside the margin
-            rival = self._plan_at(result, index)
-            if rival is not None and rival != plan:
+            neighbour_distance = distances[index] if index < len(distances) else None
+            if neighbour_distance is None:
+                return None  # cannot place it ⇒ cannot rule it out
+            if neighbour_distance >= window:
+                return plan  # ordered by distance: everything left is outside
+            # Not `rival is not None and rival != plan`: a neighbour whose plan we
+            # cannot read is precisely a neighbour we cannot rule out. Under the
+            # old spelling, one corrupted entry inside the margin turned the
+            # ambiguity check *off* for its whole neighbourhood — the guard added
+            # on 2026-08-01 failing open. The rule is positive: every neighbour
+            # inside the margin must be *demonstrably* the same plan.
+            if self._plan_at(result, index) != plan:
                 return None
-        return plan
+        # Falling off the end without ever leaving the margin means the scan was
+        # never *finished*, only stopped. If the collection holds more than we
+        # asked for, a different plan can be sitting just past the last row we
+        # fetched, and `_NEIGHBOURS_SCANNED` would be silently deciding a
+        # correctness question it was chosen for cost. Unknown ⇒ the LLM answers.
+        # (Found by a blind adversarial pass, 2026-08-01: 32 near-duplicates of
+        # one plan pushed a genuine rival to rank 32 and it was served.)
+        return plan if len(ids) >= stored else None
 
     @staticmethod
     def _plan_at(result: Any, index: int) -> Plan | None:
@@ -270,20 +366,43 @@ class PlanCache:
         row = raw_metas[0]
         if row is None or index >= len(row):
             return None
-        metadata = row[index] or {}
+        metadata = row[index]
+        # `isinstance`, not `or {}`: a truthy non-mapping (a list, say) sails past
+        # the falsy check and then dies on `.get`. Out of ChromaDB's declared
+        # contract, which is exactly the kind of assumption this method exists to
+        # not make — found by a claim audit on 2026-08-01, when the sentence "an
+        # unreadable entry is a miss, never a raise" turned out to have one
+        # surviving shape.
+        if not isinstance(metadata, dict):
+            return None
         raw = metadata.get("plan")
         if not isinstance(raw, str) or not raw:
             return None
-        return Plan.from_json(raw)
+        try:
+            return Plan.from_json(raw)
+        except PlanFormatError as exc:
+            # An entry written by another version of this code, or corrupted.
+            # Loud in the log (a permanently unreadable entry is a slow demo
+            # nobody is watching), harmless to the turn: ``None`` here means
+            # "this neighbour carries no plan we can read", and ``lookup``
+            # already treats that as a reason to let the LLM answer.
+            logger.warning("plan-cache: unreadable stored plan, ignoring it: %s", exc)
+            return None
 
     def warm(self, question: str, plan: Plan) -> None:
         """Store (or overwrite) a plan for ``question``.
 
-        Idempotent by question text: the ID is the question itself, so asking the
-        same thing twice updates in place instead of duplicating.
+        Idempotent by question **key**, not by raw text (``_question_key``): two
+        spellings of one question must be one row. Keying by the raw text made
+        them two rows that no embedder can separate — distance 0.0000 — which the
+        exact-question shortcut then resolved by rank rather than by plan.
+
+        The *document* stays the text as asked, because that is what gets
+        embedded and what a human reading the collection needs to see; only the
+        identity is normalised.
         """
         self._collection.upsert(
-            ids=[question],
+            ids=[_question_key(question)],
             documents=[question],
             metadatas=[{"plan": plan.to_json()}],
         )
