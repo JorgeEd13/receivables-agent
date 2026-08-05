@@ -515,8 +515,8 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > **Gotcha:** ChromaDB's in-process store can share state across ephemeral clients, so the
 > test fixture uses a unique collection name per test (a fixed name bled between tests).
 
-> **2026-08-01 — line-by-line audit of the plan-cache engine. Items 1 and 2 are now CLOSED
-> (addenda below); item 3 remains OPEN.** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
+> **2026-08-01 — line-by-line audit of the plan-cache engine. Items 1, 2 and 3 are now CLOSED
+> (addenda below).** `plan_cache` / `plan_replay` / `cached_agent` were walked line by line and
 > put under **43 valid mutations against the suite; 27 stayed green** (plus 6 test-side
 > mutations, all green, and 6 crossed pairs of which 4 leave the suite fully green). Every
 > number below was re-measured by a separate blind pass before being written here.
@@ -658,6 +658,44 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
 > the `neighbour_distance is None` branch is unreachable through ChromaDB; and `BaseException`
 > escapes both backstops **on purpose** — a cancelled request is not a cache failure to degrade
 > around, and swallowing it would be the bug.
+
+> **Addendum 2026-08-05 (`R1-C15`) — item 3 closed. The freshness seal is now assembled from the
+> work that actually happened (429 → 449).**
+> The sentence a cache hit prints — *"the query was re-run live against the ledger, so the numbers
+> are current"* — was a constant, not a description. Three of the twelve one-click questions the
+> image bakes are **policy-only**: zero SQL executed, full seal, live on the Space. It is now
+> composed per tool from `tools_used`, and the key set is compared against `REPLAYABLE_TOOLS` so a
+> third replayable tool cannot inherit a sentence written about the other two.
+> The two sibling holes became one owner, `plan_cache.freshness_violation`, enforced on **three**
+> sides (write, serve, image build — the collection is persistent and ships pre-seeded, so a
+> write-side check alone fixes nothing already stored):
+> a statement must **name a relation**, every output of every answering select list must be
+> **decided by the ledger**, and the statement must not **fix a point in time**.
+> ⚔️ **Both blind passes broke my first attempt at the last two, and both times for the same
+> reason: I had written a check on the *shape* of the input and called it a check on meaning.**
+> Round one: a scan for date-shaped strings misses `make_date(2026, 8, 1)`,
+> `strptime('01/08/2026', '%d/%m/%Y')` and two more — none of which contains anything DuckDB reads
+> as a date; and "names a relation" misses `SELECT 425000.00 AS total_overdue FROM invoices WHERE
+> 1 = 0 UNION ALL SELECT 425000.00`. Round two broke the **repairs**: vetoing a fixed date on any
+> mention of the clock made `make_date(2026, 8, 1 + (current_date - current_date))` permanent
+> (mentioning is not depending — and that veto existed only to fix a false refusal I had just
+> caused, which is a guard against noise becoming a channel for silence); and "an output that
+> fails to bind alone proves the list reads data" was satisfied by `row_number() OVER ()`, which
+> reads nothing at all. Both rules are positive now and both ask the **binder**, not a pattern.
+> The third finding was an over-block of my own making: `EXISTS (SELECT 1 …)`, the semi-join every
+> dialect writes, was refused until predicate subqueries were excluded from the output rule.
+> **27 code mutations, 25 red — 14 of the 16 that RELAX included**; both greens named (node-type
+> vs field keying, indistinguishable over a 147-statement sweep; and an unreachable `fetchone()`
+> branch written for its direction). One earlier mutation of mine was **invalid** and is not
+> counted — reordering two rules never changes the verdict, only the reason printed. 7 test-side
+> mutations, 7 green; 12 crossed pairs, 2 holes, both the single ownership this session designed.
+> Two repairs fell out of the tests, in code this session did not set out to touch:
+> `_statement_and_tree` is the single owner of *text → one statement → tree* (the empty string was
+> reporting itself as a clean statement that reads nothing, because `json_serialize_sql('')`
+> returns `{"statements": []}` with **no error**), and `guard_query` had kept its own inline
+> `.strip()` while `_statement_text` claimed in prose to be "the one owner" and named it as a
+> caller — identical behaviour, false sentence, the ADR-014 defect in documentation-only form.
+> Details in **ADR-009 Amendment 2026-08-05**.
 
 > **NEXT (needs the notebook — model + normal network):** Layers 2–3 — hardened tiny local
 > LLM (`qwen2.5:0.5b/1.5b` Q4_K_M) with **GBNF grammar-constrained tool-calls** + KV cache;

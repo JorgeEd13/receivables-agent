@@ -167,7 +167,9 @@ def _replayed_seal(con) -> str:
     A copied seal rots into a string nothing produces, and "the reply does not
     contain a string nothing produces" is a check that always passes.
     """
-    trivial = Plan((ToolStep("query_ledger", {"sql": "SELECT 1 AS n FROM customers"}),))
+    # Trivial, but not *constant*: a select list the ledger does not decide is
+    # refused before the seal is ever printed (R1-C15).
+    trivial = Plan((ToolStep("query_ledger", {"sql": "SELECT count(*) AS n FROM customers"}),))
     return replay_plan(trivial, con, policy=None, max_rows=100, search_k=1).reply.split("\n")[0]
 
 

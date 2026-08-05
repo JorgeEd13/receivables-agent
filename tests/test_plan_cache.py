@@ -36,6 +36,7 @@ from src.agent.plan_cache import (
 )
 from src.agent.plan_replay import ReplayError, replay_plan
 from src.rag.embeddings import DeterministicEmbeddingFunction
+from tests.conftest import repo_root, shipped_default
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -103,7 +104,10 @@ def test_plan_with_unsafe_sql_is_not_cached() -> None:
 
 
 def test_plan_dedupes_repeated_identical_calls() -> None:
-    call = {"sql": "SELECT 1 AS n FROM customers"}
+    # `count(*)`, not `SELECT 1`: a select list fixed at write time is no longer
+    # cacheable at all (R1-C15), and a fixture that trips a *different* rule
+    # would make this test pass for the wrong reason.
+    call = {"sql": "SELECT count(*) AS n FROM customers"}
     messages = [_tool_turn("query_ledger", call), _tool_turn("query_ledger", call), _final("ok")]
     plan = plan_from_messages(messages)
     assert plan is not None and len(plan.steps) == 1
@@ -424,40 +428,9 @@ def test_curated_questions_match_ui_suggestions() -> None:
 # the demo runs on a cache hit, against the ledger `data/generate.py` builds.
 
 
-@pytest.fixture(scope="module")
-def policy():
-    """The real policy document, indexed offline into an ephemeral collection.
-
-    The deterministic (hashing) embedding stands in for MiniLM, so what this
-    fixture supports is "retrieval finds *a* section and names it", never "this
-    query ranks that section first" — the ranking belongs to the real embedding
-    and is not measured here.
-    """
-    from src.rag.index import build_index
-
-    return build_index(
-        chromadb.EphemeralClient(),
-        str(_repo_root() / _shipped("policy_path")),
-        "curated_policy_replay",
-        DeterministicEmbeddingFunction(),
-    )
-
-
-def _repo_root():
-    from pathlib import Path
-
-    return Path(__file__).resolve().parents[1]
-
-
-def _shipped(field: str):
-    """The default that ships, read off `Settings` instead of copied here.
-
-    Not `Settings()`: that would read the developer's git-ignored `.env`, and a
-    local `MAX_ROWS=5` must not quietly change what these assert.
-    """
-    from src.core.config import Settings
-
-    return Settings.model_fields[field].default
+# The `policy` fixture (and `_shipped`) live in `conftest.py`: a second suite —
+# `test_replay_claims.py` — needs the same real index, and a second copy of it
+# would be a second thing to keep in step.
 
 
 def _replay(plan, ledger, policy):
@@ -467,8 +440,8 @@ def _replay(plan, ledger, policy):
         plan,
         ledger,
         policy,
-        max_rows=_shipped("max_rows"),
-        search_k=_shipped("search_k"),
+        max_rows=shipped_default("max_rows"),
+        search_k=shipped_default("search_k"),
     )
 
 
@@ -541,7 +514,7 @@ def test_every_curated_policy_step_reaches_a_section_that_exists(policy) -> None
     from src.agent.plan_replay import _replay_search
     from src.rag.chunking import chunk_policy
 
-    path = _repo_root() / _shipped("policy_path")
+    path = repo_root() / shipped_default("policy_path")
     headings = {c.heading for c in chunk_policy(path.read_text(encoding="utf-8"), path.name)}
     assert headings, "the policy document parsed into no sections"
 
@@ -557,7 +530,7 @@ def test_every_curated_policy_step_reaches_a_section_that_exists(policy) -> None
 
     for query, section in sorted(CURATED_POLICY_SECTIONS.items()):
         assert section in headings, f"{query!r} targets a section the policy no longer has"
-        rendered = _replay_search({"query": query}, policy, _shipped("search_k"))
+        rendered = _replay_search({"query": query}, policy, shipped_default("search_k"))
         assert any(f"**{heading}**" in rendered for heading in headings), query
 
 # --- tiny-model prompt + graceful recursion (ADR-013) ------------------- #

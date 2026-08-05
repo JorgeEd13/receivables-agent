@@ -1246,6 +1246,105 @@ ChromaDB call cannot currently produce; and — deliberately — `BaseException`
 and `CancelledError` escape both backstops on purpose: a cancelled request is not a cache failure
 to be degraded around, and swallowing it would be the bug.
 
+### Amendment 2026-08-05 (`R1-C15`) — the freshness seal was printed over work that never happened
+
+Decision 2 says a hit is replayed live and the number reflects the current data. The **reply says
+so too**, in one sentence prefixed to every cache hit — and that sentence was not a description of
+the hit, it was a constant. A blind adversarial pass given the three modules and that sentence
+(and nothing else) returned three executable reproductions, none of which any mutation of this
+code would find, because **none of them has a line to delete**. The claim was simply wider than
+the work:
+
+1. **A policy-only plan carried the ledger sentence.** `search_policy` steps execute no SQL at
+   all, and the prefix still read *"the query was re-run live against the ledger, so the numbers
+   are current"*. Three of the twelve curated one-click questions the demo image bakes are
+   policy-only, so this was live on the Space, over an answer read out of a static document.
+2. **A query can read nothing.** `guard_query("SELECT 425000.00 AS total_overdue")` **passes** —
+   the relation allow-list is satisfied *vacuously* when there is no relation to allow, which is
+   correct for a security guard and useless as a correctness one. A tiny model that hallucinates
+   a number straight into the tool call gets it stored as a "plan" and re-printed forever under
+   the seal; measured against an emptied ledger, the reply still said 425,000. The guard's five
+   allow-listed generators (`range`, `generate_series`, …) are the same shape.
+3. **A query can pin a date.** `WHERE due_date < '2026-08-01'` re-runs perfectly and answers *the
+   question of the day it was written*. The number is fresh; the **semantics** are frozen.
+   Measured on a ledger with four overdue invoices, the hit answered `1`.
+
+**Decision — the seal is assembled from the work, and work that cannot earn it is not replayed:**
+
+1. **The prefix is composed from the tools that actually ran** (`_FRESHNESS_CLAIMS` in
+   `plan_replay`, one sentence per tool, joined in run order). The key set is compared against
+   `REPLAYABLE_TOOLS` by a test, so a third replayable tool cannot inherit a sentence written
+   about the other two, and a tool with no claim raises `ReplayError` (a slow turn) rather than
+   borrowing the nearest sentence.
+2. **`plan_cache.freshness_violation` is the one owner of "may this SQL be replayed as current".**
+   Three rules, each answered by the parser or the binder rather than by a pattern:
+   `relations_read` (the guard's own tree walk, reused) requires a relation to be named;
+   `invented_outputs` requires every output of every answering select list to be decided by the
+   ledger; `frozen_time_expressions` refuses a statement that fixes a point in time when it is
+   written.
+   One attribution to keep straight (a claim audit caught it being blurred): only *some* of the
+   relation-less shapes are refused by rule 1. `SELECT 425000.00` and `SELECT * FROM range(5)`
+   are — the allow-list is satisfied vacuously — while `sqlite_master`, `duckdb_settings()` and a
+   `(VALUES …)` source never reach it, because `sql_guard` refuses them first on its own terms.
+3. **It is enforced on both sides, and in the image build.** `plan_from_messages` refuses to
+   store; `_replay_query` refuses to serve; `seed_plan_cache.rejection_reason` refuses to bake.
+   The redundancy is deliberate and the reason is ADR-009's own premise: the collection is
+   persistent, ships pre-seeded, and outlives the code that filled it — a write-side check alone
+   fixes nothing that is already stored. Each side has its own test, so neither can be deleted
+   while the other covers for it.
+
+**Two blind passes decided the shape of rules 2 and 3, and both of my first attempts were shape
+checks wearing the costume of meaning checks.**
+
+*Rule 3, first written as a scan for date-shaped string constants.* Falsified in minutes:
+`make_date(2026, 8, 1)`, `to_timestamp(1785110400)::DATE`, `('2026-08' || '-01')::DATE` and
+`strptime('01/08/2026', '%d/%m/%Y')` all pin a date and contain **no** date-shaped string —
+`'01/08/2026'` is not a date to DuckDB and `'2026-08'` is half of one. Rewritten to ask the
+**binder**: an expression is fixed when it types as a point in time with no column in it. Then the
+repair itself was broken — vetoing on any mention of `current_date` turned
+`make_date(2026, 8, 1 + (current_date - current_date))` into a permanent 2026-08-01. Mentioning is
+not depending, so the clock now has to *carry its value out* through temporal-typed steps
+(`current_date - current_date` collapses to an INTEGER and stops rescuing anything).
+
+*Rule 2, first written as "is a relation named".* `SELECT 425000.00 AS total_overdue FROM invoices
+WHERE 1 = 0 UNION ALL SELECT 425000.00` names one and reads nothing. Rewritten as "does any output
+fail to bind alone" — and broken again by `row_number() OVER ()`, which reads no relation and was
+enough to certify a list of invented numbers as ledger-decided: absence of evidence had been wired
+up as evidence. The rule is now **positive** (a column, a star or an aggregate) and applies to
+*every* output. Requiring all of them also over-blocked `EXISTS (SELECT 1 …)` until predicate
+subqueries were excluded — a placeholder inside a predicate is not an answer.
+
+**The stated costs**, all of them one slow answer: a question that deliberately names a date is
+never cached; a query that labels its own result (`SELECT 'total' AS label, sum(amount) …`) is
+never cached; and a clock reading that leaves the temporal types and comes back
+(`make_date(year(current_date), 8, 1)`) is read as fixed. That is the side this ADR picks every
+time, and it costs the demo nothing — no curated plan trips any of the three, and a test keeps it
+that way.
+
+**27 code mutations, 25 red — 14 of the 16 that RELAX included.** Both greens are honest and
+named: keying the constant scan on the node *type* instead of the field it carries is
+indistinguishable over a 147-statement sweep of the two guard suites, and the `row is None` branch
+after `fetchone()` is unreachable through DuckDB (it is written for its *direction*, so an
+unanswerable cast pins rather than passes). One earlier mutation of mine was **invalid** and is not
+counted: reordering two of the rules never changes the verdict, only which reason is printed —
+a mutation that measures nothing reads exactly like a guarantee that holds. Seven test-side
+mutations, all seven green, which is the expected shape: each weakened assertion is the only owner
+of its property. Twelve crossed pairs, **two become holes**, and both are the single-ownership this
+session designed on purpose — the `REPLAYABLE_TOOLS` surface equality (a third replayable tool
+added without a claim) and the over-refusal corpus (predicate subqueries excluded from the output
+rule). Tests: **429 → 449**.
+
+Two repairs fell out of writing the tests, both in code this session did not set out to touch:
+`_statement_and_tree` is now the single owner of *text → one statement → tree*, because
+`json_serialize_sql('')` returns `{"statements": []}` with no error, so the empty string was
+reporting itself as a clean statement that reads nothing — a vacuous yes, the same family as the
+findings above. And `guard_query` had kept its own inline `.strip()` while `_statement_text`'s
+docstring named it as a caller and called itself "the one owner". Identical behaviour, false
+sentence: the ADR-014 defect in its documentation-only form. (Identical *by construction* — the
+two spellings are the same expression — and checked as well by a differential run of both
+versions over the 298 SQL strings the guard and eval suites contain: **zero** verdict changes.
+That is a corpus, not a proof over arbitrary SQL.)
+
 ## ADR-008 — AI-native layer: shared-guardrail MCP server + property-based evals
 
 **Status:** Accepted · 2026-06-08

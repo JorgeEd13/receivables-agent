@@ -58,7 +58,13 @@ import chromadb
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import EmbeddingFunction
 
-from src.agent.sql_guard import GuardrailError, guard_query
+from src.agent.sql_guard import (
+    GuardrailError,
+    frozen_time_expressions,
+    guard_query,
+    invented_outputs,
+    relations_read,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +213,76 @@ class Plan:
         return cls(steps=tuple(steps))
 
 
+def freshness_violation(sql: str) -> str | None:
+    """Why replaying this SQL could not honestly carry the freshness claim.
+
+    Returns the reason, or ``None`` when the statement earns the claim. The
+    claim is the product here — ``plan_replay`` prints *"the query was re-run
+    live against the ledger, so the numbers are current"* over the result — and
+    two shapes pass ``sql_guard`` while making it false. Both were found by a
+    blind adversarial pass on 2026-08-01 that attacked the *sentence* instead of
+    the code; neither is a security hole, which is why the guard is right not to
+    care about them (a security guard and a correctness guard are different
+    guards — R1-C11):
+
+    * **the statement reads nothing.** ``SELECT 425000.00 AS total_overdue``
+      satisfies the relation allow-list *vacuously* — there is no relation to
+      allow — so a model that hallucinates a number straight into the tool call
+      gets it stored as a "plan" and re-printed forever under the seal. Measured
+      against an emptied ledger: the reply still said 425,000. The same is true
+      of the guard's five allow-listed generators (``range``, ``generate_series``
+      …): valid, read-only, and no evidence about the ledger.
+    * **the statement answers without reading.** Naming a relation is a
+      *necessary* condition for reading it, never a sufficient one, and a blind
+      pass built the difference on 2026-08-05:
+      ``SELECT 425000.00 AS total_overdue FROM invoices WHERE 1 = 0 UNION ALL
+      SELECT 425000.00``. So the outputs are checked too (``invented_outputs``):
+      every one of them, in every answering select list, must be decided by the
+      ledger.
+    * **the statement pins a date.** ``WHERE due_date < '2026-08-01'`` re-runs
+      perfectly and answers *the question of the day it was written*. The number
+      is not frozen — the **semantics** are. Measured on a ledger with four
+      overdue invoices, the hit answered one. This is exactly what a model
+      writes when it does not use ``meta.as_of_date`` or ``now()``, and those
+      two are how a plan asks a time-relative question and stays honest. The
+      same blind pass showed the date need not be a literal at all —
+      ``make_date(2026, 8, 1)`` and ``strptime('01/08/2026', '%d/%m/%Y')`` pin
+      one with no date-shaped string anywhere — so the rule asks the binder what
+      an expression *means*, not what it looks like
+      (``frozen_time_expressions``).
+
+    The cost of the last rule, stated plainly: a question that *deliberately*
+    names a date ("how many were overdue on 2026-03-01?") is never cached and
+    always pays the slow model. That is the side ADR-009 picks every time — a
+    slow answer beats a confidently wrong one — and it is why the reason is
+    returned as text: the caller decides whether to log it or drop the turn.
+
+    **What this still does not prove:** that the answer *moved* with the ledger.
+    Only executing the plan twice against different data would show that, which
+    is not something a write-path check can do. These three rules rule out the
+    shapes that cannot possibly be reading it.
+    """
+    try:
+        relations = relations_read(sql)
+        invented = invented_outputs(sql)
+        pinned = frozen_time_expressions(sql)
+    except GuardrailError as exc:
+        return f"SQL is not a parseable read-only statement: {exc}"
+    if not relations:
+        return "SQL reads no ledger relation, so re-running it proves nothing."
+    if invented:
+        return (
+            "SQL answers from values the ledger does not decide ("
+            + "; ".join(sorted(set(invented))) + ")."
+        )
+    if pinned:
+        return (
+            "SQL pins a date (" + ", ".join(sorted(pinned))
+            + "), so a replay answers the question of the day it was written."
+        )
+    return None
+
+
 def plan_from_messages(messages: list[Any]) -> Plan | None:
     """Extract a cacheable plan from a finished agent turn, or ``None``.
 
@@ -216,9 +292,15 @@ def plan_from_messages(messages: list[Any]) -> Plan | None:
 
     * it called **no** replayable tool (nothing to ground / re-execute), or
     * any ``query_ledger`` SQL does not pass ``sql_guard`` (never store a plan we
-      couldn't re-validate and run read-only).
+      couldn't re-validate and run read-only), or
+    * any ``query_ledger`` SQL cannot carry the freshness claim a replay prints
+      over it (``freshness_violation``) — it reads no relation, or it pins a date.
 
-    A returned plan is guaranteed re-validatable and read-only.
+    A returned plan is guaranteed re-validatable, read-only, and honest to replay.
+    This is the *write* side of that last guarantee; ``plan_replay`` enforces it
+    again on the *read* side, and the redundancy is the point: the collection is
+    persistent and ships pre-seeded inside the demo image, so plans written by an
+    older version of this function are served by today's replay.
     """
     steps: list[ToolStep] = []
     seen: set[tuple[str, str]] = set()
@@ -237,7 +319,8 @@ def plan_from_messages(messages: list[Any]) -> Plan | None:
     if not steps:
         return None
 
-    # Never cache a plan we cannot re-validate as read-only.
+    # Never cache a plan we cannot re-validate as read-only — nor one whose
+    # replay would print a freshness claim it does not earn.
     for step in steps:
         if step.tool == "query_ledger":
             sql = step.args.get("sql")
@@ -246,6 +329,10 @@ def plan_from_messages(messages: list[Any]) -> Plan | None:
             try:
                 guard_query(sql)
             except GuardrailError:
+                return None
+            reason = freshness_violation(sql)
+            if reason is not None:
+                logger.info("plan-cache: not caching this turn — %s", reason)
                 return None
 
     return Plan(steps=tuple(steps))

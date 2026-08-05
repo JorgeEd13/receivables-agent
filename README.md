@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://jorgeed-receivables-agent.hf.space"><img src="https://img.shields.io/badge/live%20demo-try%20it-brightgreen?logo=huggingface&logoColor=white" alt="Live demo — try it"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/tests-429%20passing-brightgreen" alt="429 tests">
+  <img src="https://img.shields.io/badge/tests-449%20passing-brightgreen" alt="449 tests">
   <img src="https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker Compose">
   <img src="https://img.shields.io/badge/built%20with-LangGraph-1C3C3C" alt="Built with LangGraph">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
@@ -23,7 +23,8 @@
 <p align="center">
   <em>A self-contained Hugging Face Space running its <strong>own tiny local model</strong>.
   The one-click example questions answer <strong>instantly</strong> (cached <em>plans</em>, re-run
-  live against the ledger, so the numbers are current); a typed question runs the tiny model on a
+  live — the ledger ones against the ledger, so the numbers are current; the policy ones against
+  the policy document); a typed question runs the tiny model on a
   free CPU, so it's slower — the UI streams the agent's steps so you can watch it think. That
   slowness is the honest free-tier floor: the <strong>architecture</strong> is the product, and
   the same code shines pointed at a stronger model.</em>
@@ -43,7 +44,7 @@ text-to-SQL tool** over the ledger with **retrieval over the collections
 policy**.
 
 > **The honesty boundary.** A public, **clean-room** portfolio project on **100% synthetic
-> data** — no proprietary code, no real ledger. Shipped and live: **429 offline tests**, CI
+> data** — no proprietary code, no real ledger. Shipped and live: **449 offline tests**, CI
 > green. The UI is localized (EN/PT-BR), but the agent's answers come from the model and an
 > **English** policy corpus — they are not machine-translated.
 >
@@ -199,7 +200,7 @@ cd web && npm install && npm run dev          # http://localhost:5173
 
 ```bash
 pip install -e ".[dev]"
-pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (429 tests)
+pytest            # offline: SQL guardrail, RAG, API, MCP, evals, plan-cache, turn-control (449 tests)
 ```
 
 ## AI-native layer

@@ -1,15 +1,20 @@
 """Fixtures shared by more than one suite.
 
-Right now that is one thing: a **real ledger**, built by `data/generate.py`
-through its own entry point. Two suites need it for the same reason — they check
-something the repo *says* about the schema against the schema the product
-actually builds. `test_schema_hints.py` checks the prompt's map of it;
-`test_plan_cache.py` checks that the curated SQL baked into the demo image still
-runs on it.
+Two things, for one reason: they let a suite check something the repo *says*
+against what the product actually builds.
 
-It lives here rather than in either file because a second copy of the fixture is
-a second thing to keep in step, and a ledger built slightly differently in one
-suite would make that suite's assertions quietly weaker than they read.
+* a **real ledger**, built by `data/generate.py` through its own entry point.
+  `test_schema_hints.py` checks the prompt's map of it; `test_plan_cache.py`
+  checks that the curated SQL baked into the demo image still runs on it.
+* the **real policy document**, indexed offline. `test_plan_cache.py` replays
+  the curated policy chips through it; `test_replay_claims.py` checks what the
+  reply *claims* about a replay that only touched it.
+
+They live here rather than in one of the suites because a second copy of a
+fixture is a second thing to keep in step, and a ledger (or an index) built
+slightly differently in one suite would make that suite's assertions quietly
+weaker than they read. `policy` moved here on 2026-08-05, when the second
+consumer appeared — the same move `ledger` made on 2026-08-01.
 
 No `skipif` on purpose. `tests/test_ledger.py` skips when `data/ledger.duckdb`
 is absent — which, since the file is git-ignored, means it skips in CI, where
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -65,3 +71,40 @@ def ledger(tmp_path_factory) -> Iterator[duckdb.DuckDBPyConnection]:
     con = duckdb.connect(path, read_only=True)
     yield con
     con.close()
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def shipped_default(field: str):
+    """The default that ships, read off `Settings` instead of copied here.
+
+    Not `Settings()`: that would read the developer's git-ignored `.env`, and a
+    local `MAX_ROWS=5` must not quietly change what a suite asserts.
+    """
+    from src.core.config import Settings
+
+    return Settings.model_fields[field].default
+
+
+@pytest.fixture(scope="module")
+def policy():
+    """The real policy document, indexed offline into an ephemeral collection.
+
+    The deterministic (hashing) embedding stands in for MiniLM, so what this
+    fixture supports is "retrieval finds *a* section and names it", never "this
+    query ranks that section first" — the ranking belongs to the real embedding
+    and is not measured here.
+    """
+    import chromadb
+
+    from src.rag.embeddings import DeterministicEmbeddingFunction
+    from src.rag.index import build_index
+
+    return build_index(
+        chromadb.EphemeralClient(),
+        str(repo_root() / shipped_default("policy_path")),
+        "shared_policy_index",
+        DeterministicEmbeddingFunction(),
+    )

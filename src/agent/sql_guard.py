@@ -82,6 +82,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from functools import lru_cache
 from typing import Any
 
 import duckdb
@@ -295,15 +296,43 @@ def _syntax_tree(sql: str) -> dict[str, Any]:
 def _statement_text(sql: str) -> str:
     """The exact text handed to the parser — the one owner of that decision.
 
-    It exists because there are now two entry points that must agree on it
-    (`guard_query` and `statement_identity`), and a second copy of `.strip()` is a
-    second thing to keep in step. Measured 2026-08-01, before this was shared: with
+    It exists because there are entry points that must agree on it
+    (`statement_identity`, and `_statement_and_tree` for everything else), and a
+    second copy of `.strip()` is a second thing to keep in step. Until 2026-08-05
+    this sentence named `guard_query` as a caller and `guard_query` kept its own
+    inline `.strip()`; both spellings did the same thing, which is why nothing
+    caught it. Measured 2026-08-01, before this was shared: with
     `statement_identity` reading the raw text, a leading `\\x0b` made it return "no
     opinion" while the guard stripped the same character and ran the statement — so
     a query that *executed* fell back to the text key, restoring the literal
     collision the tree key exists to prevent.
     """
     return sql.strip()
+
+
+def _statement_and_tree(sql: str) -> tuple[str, dict[str, Any]]:
+    """The text handed to the parser and the tree it produced — one statement.
+
+    Three steps that only mean anything in this order: normalise the text once
+    (`_statement_text`), refuse anything that is not exactly one statement, then
+    parse. Written once because there are now three entry points that need it,
+    and the two added on 2026-08-05 (`relations_read`, `time_literals`) are
+    *facts about a statement* — asking them about text that holds none has to be
+    an error, not the answer "no relations, no dates". Measured while writing
+    their tests: `json_serialize_sql('')` returns ``{"statements": []}`` with no
+    error at all, so without the count check the empty string reports itself as
+    a clean statement that reads nothing. A vacuous yes is precisely the family
+    of defect this session exists to close.
+
+    `guard_query` had its own inline copy of the first two steps until today,
+    while `_statement_text` below claimed in prose to be "the one owner" and
+    named `guard_query` as one of its callers. It was not one. Identical
+    behaviour, false sentence — the ADR-014 defect in its documentation-only
+    form (R1-C14: a docstring saying "single owner" is not a single owner).
+    """
+    text = _statement_text(sql)
+    _single_statement(text)
+    return text, _syntax_tree(text)
 
 
 def statement_identity(sql: str) -> str | None:
@@ -542,6 +571,436 @@ def _collect(
             _collect(value, tables, functions, pseudo, scope, depth + 1)
 
 
+def relations_read(sql: str) -> frozenset[str]:
+    """Every relation the statement resolves against the catalog.
+
+    The same walk `guard_query` validates with, asked for its intermediate
+    result instead of its verdict — CTE names already resolved away, qualified
+    names already assembled. It is a *fact* about the statement, not a policy:
+    the guard uses it to decide what is allowed, and the plan-cache uses it to
+    decide what a replay can honestly claim (an empty set means the statement
+    reads no ledger data at all, so re-running it proves nothing about the
+    ledger — see `plan_cache.freshness_violation`).
+
+    Deliberately not a second walk: a copy of `_collect` would drift from the
+    guard's scoping rules exactly where those rules are subtle, which is how
+    the CTE holes in ADR-022 happened in the first place. Parsing goes through
+    `_statement_and_tree` for the same reason — one owner for text, count and
+    parse, so this can never disagree with what `guard_query` validated.
+
+    Raises `GuardrailError` if `sql` is not exactly one read-only SELECT, so a
+    caller that has not run it through `guard_query` still cannot get a silent
+    answer — and neither can a caller that hands it no statement at all.
+    """
+    _text, tree = _statement_and_tree(sql)
+    tables: set[str] = set()
+    functions: set[str] = set()
+    pseudo: set[str] = set()
+    _collect(tree, tables, functions, pseudo)
+    return frozenset(tables)
+
+
+@lru_cache(maxsize=1)
+def _expression_frame() -> str:
+    """A serialized ``SELECT 1``, used as a frame to print one expression back.
+
+    DuckDB will only print a *statement*, so an expression is spliced into this
+    skeleton's select list and deserialized. Round-tripping through the engine's
+    own printer is the only way to get text that means what the node means; any
+    reconstruction written here would be a second SQL printer, and a printer
+    that disagrees with the parser is the class of defect ADR-022 exists for.
+    """
+    with _parser_lock:
+        raw = _parser().execute("SELECT json_serialize_sql('SELECT 1')").fetchone()
+    if not raw or not raw[0]:  # pragma: no cover - a constant query that parsed
+        raise GuardrailError("Parser could not serialize its own skeleton.")
+    return str(raw[0])
+
+
+@lru_cache(maxsize=1)
+def _moving_functions() -> frozenset[str]:
+    """Functions whose value is not fixed at write time — read from the catalog.
+
+    `now()`, `current_date`, `today()` are ``CONSISTENT_WITHIN_QUERY``;
+    `random()` is ``VOLATILE``; `make_date`, `strptime`, `date_trunc` are
+    ``CONSISTENT``. That column is the engine's own statement about which
+    expressions move, so the set is derived rather than listed — a hand-written
+    list of clock functions is the enumerated guard this module keeps being bitten
+    by, and it would go stale the first time DuckDB adds one.
+
+    Unknown stability (``NULL``) is deliberately **not** treated as moving: an
+    expression it appears in stays a frozen-date candidate, which costs a cache
+    hit rather than a false freshness claim. Measured 2026-08-05: no scalar
+    function has a NULL stability, so the branch is insurance.
+    """
+    with _parser_lock:
+        rows = (
+            _parser()
+            .execute(
+                "SELECT DISTINCT lower(function_name) FROM duckdb_functions() "
+                "WHERE stability IS NOT NULL AND stability <> 'CONSISTENT'"
+            )
+            .fetchall()
+        )
+    return frozenset(str(row[0]) for row in rows)
+
+
+@lru_cache(maxsize=1)
+def _aggregate_functions() -> frozenset[str]:
+    """Aggregate names, from the catalog — see `constant_projections`."""
+    with _parser_lock:
+        rows = (
+            _parser()
+            .execute(
+                "SELECT DISTINCT lower(function_name) FROM duckdb_functions() "
+                "WHERE function_type = 'aggregate'"
+            )
+            .fetchall()
+        )
+    return frozenset(str(row[0]) for row in rows)
+
+
+@lru_cache(maxsize=1)
+def _temporal_types() -> frozenset[str]:
+    """Every type name in the catalog's ``DATETIME`` category."""
+    with _parser_lock:
+        rows = (
+            _parser()
+            .execute(
+                "SELECT DISTINCT lower(type_name) FROM duckdb_types() "
+                "WHERE type_category = 'DATETIME'"
+            )
+            .fetchall()
+        )
+    return frozenset(str(row[0]) for row in rows)
+
+
+@lru_cache(maxsize=1)
+def _point_in_time_types() -> frozenset[str]:
+    """The temporal types that denote a *point*, not a duration.
+
+    The whole ``DATETIME`` category minus ``interval`` — the one member that is
+    relative. `now() - INTERVAL 30 DAY` has to stay cacheable, so the exception
+    is named here with its reason rather than the set being written out by hand
+    (measured 2026-08-05: 14 type names in the category, `interval` the only
+    relative one). The full set is still needed by `_moves_with_clock`, where an
+    interval derived from the clock does carry the clock forward.
+    """
+    return _temporal_types() - {"interval"}
+
+
+def _expression_text(node: Any) -> str | None:
+    """`SELECT <node>` as DuckDB prints it, or `None` if it is not an expression."""
+    frame = json.loads(_expression_frame())
+    frame["statements"][0]["node"]["select_list"] = [node]
+    try:
+        with _parser_lock:
+            raw = (
+                _parser()
+                .execute("SELECT json_deserialize_sql(?)", [json.dumps(frame)])
+                .fetchone()
+            )
+    except duckdb.Error:
+        return None  # not an expression node — the caller walks into its children
+    return str(raw[0]) if raw and raw[0] else None
+
+
+def _bound_type(select_text: str) -> str | None:
+    """The type `select_text` binds to, or `None` when it does not bind alone.
+
+    ``DESCRIBE`` runs the **binder** and not the executor: it answers the type
+    without evaluating, so probing `range(1000000000)` costs nothing and a
+    hostile expression cannot turn this into work. Failure to bind is the
+    signal, not an error to report — an expression that needs a column is by
+    definition not fixed at write time, which is exactly what the callers want
+    to know.
+    """
+    try:
+        with _parser_lock:
+            rows = _parser().execute(f"DESCRIBE {select_text}").fetchall()
+    except duckdb.Error:
+        return None
+    return str(rows[0][1]).lower() if rows else None
+
+
+def _walk_expressions(tree: Any, visit: Any, depth: int = 0) -> None:
+    """Depth-first walk over dict/list nodes, calling `visit(node)` on each dict.
+
+    `visit` returns `True` to stop the walk descending into that node. Bounded
+    like `_collect`, and for the same reason: recursion depth is a property of
+    attacker-controlled input, so the alternative stopping point is a
+    `RecursionError` no caller catches.
+    """
+    if depth > MAX_WALK_DEPTH:
+        raise GuardrailError(f"Query is nested too deeply (walk limit {MAX_WALK_DEPTH}).")
+    if isinstance(tree, dict):
+        if visit(tree):
+            return
+        for child in tree.values():
+            _walk_expressions(child, visit, depth + 1)
+    elif isinstance(tree, list):
+        for child in tree:
+            _walk_expressions(child, visit, depth + 1)
+
+
+def _function_names(node: Any) -> set[str]:
+    names: set[str] = set()
+
+    def visit(candidate: dict[str, Any]) -> bool:
+        name = candidate.get("function_name")
+        if name:
+            names.add(str(name).lower())
+        return False
+
+    _walk_expressions(node, visit)
+    return names
+
+
+def _child_nodes(node: dict[str, Any], skip: frozenset[str] = frozenset()) -> list[Any]:
+    """The dict children of `node`, through lists, minus the named keys."""
+    children: list[Any] = []
+    for key, value in node.items():
+        if key in skip:
+            continue
+        if isinstance(value, dict):
+            children.append(value)
+        elif isinstance(value, list):
+            children.extend(item for item in value if isinstance(item, dict))
+    return children
+
+
+def _is_clock(node: dict[str, Any]) -> bool:
+    """Whether this node *is* the clock — under either spelling.
+
+    `now()` and `today()` are functions the catalog marks as moving.
+    `current_date` and `current_timestamp` are **not**: DuckDB parses them as a
+    column reference and the binder resolves the name later, and
+    `current_timestamp` is not even in ``duckdb_functions()`` (measured
+    2026-08-05). So a bare identifier that still binds with no table in scope is
+    taken as a built-in, which is what it can only be.
+    """
+    name = node.get("function_name")
+    if name and str(name).lower() in _moving_functions():
+        return True
+    if "column_names" in node:
+        text = _expression_text(node)
+        return text is not None and _bound_type(text) is not None
+    return False
+
+
+def _moves_with_clock(node: dict[str, Any], depth: int = 0) -> bool:
+    """Whether this expression's value follows the clock.
+
+    Not *"does the clock appear anywhere inside"* — that was the first version,
+    and a blind pass broke it in one line: `make_date(2026, 8, 1 + (current_date
+    - current_date))` mentions the clock, cancels it out, and pins 2026-08-01
+    forever. Mentioning is not depending. Fixing a false refusal by adding a
+    blanket veto is how a guard against noise becomes a channel for silence.
+
+    So the clock has to *carry its value out*: it counts only through steps that
+    are themselves temporal. `now() - INTERVAL 30 DAY` stays a moving timestamp
+    at every step; `current_date - current_date` collapses to an INTEGER, and an
+    integer is not a time the clock is still deciding.
+
+    The stated limit: a clock reading that leaves the temporal types and comes
+    back — `make_date(year(current_date), 8, 1)` — is read as fixed and its plan
+    is refused. That costs a cache hit for a real question, which is the
+    direction this whole rule fails in on purpose.
+    """
+    if depth > MAX_WALK_DEPTH:
+        raise GuardrailError(f"Query is nested too deeply (walk limit {MAX_WALK_DEPTH}).")
+    if _is_clock(node):
+        return True
+    for child in _child_nodes(node):
+        if not _moves_with_clock(child, depth + 1):
+            continue
+        text = _expression_text(child)
+        if text is not None and (_bound_type(text) or "") in _temporal_types():
+            return True
+    return False
+
+
+def _is_fixed_point_in_time(node: dict[str, Any]) -> str | None:
+    """The printed expression if it is a *fixed* date/time, else `None`."""
+    text = _expression_text(node)
+    if text is None:
+        return None
+    bound = _bound_type(text)
+    if bound is None:
+        return None  # needs a column ⇒ not fixed at write time
+    if bound not in _point_in_time_types():
+        return None
+    return None if _moves_with_clock(node) else text
+
+
+@lru_cache(maxsize=512)
+def frozen_time_expressions(sql: str) -> tuple[str, ...]:
+    """Every expression whose value is a date/time **fixed when it was written**.
+
+    This is what makes a cached plan answer *the question of the day it was
+    written*: the number it returns is fresh, but `due_date < '2026-08-01'` asks
+    a different question every day it is not run.
+
+    **The engine decides, twice.** An expression is fixed if (a) it contains no
+    function the catalog marks as moving (`_moving_functions`), and (b) DuckDB's
+    **binder** gives it a point-in-time type when asked alone — which it can only
+    do if the expression needs no column. Both answers come from the same engine
+    that will run the query, never from a pattern.
+
+    That matters because a date does not have to be a literal. Written as a
+    literal scan over string constants, this rule was falsified by a blind pass
+    in four ways within minutes: `make_date(2026, 8, 1)`,
+    `to_timestamp(1785110400)::DATE`, `('2026-08' || '-01')::DATE` and
+    `strptime('01/08/2026', '%d/%m/%Y')` all pin a date and carry **no**
+    date-shaped string — `'01/08/2026'` is not a date to DuckDB, and `'2026-08'`
+    is half of one. Checking the *shape of the input* instead of the *meaning of
+    the expression* is the same mistake as counting semicolons in text, one
+    module up (ADR-022, 2026-08-05).
+
+    A bare string literal is still checked by `TRY_CAST`, because the binder
+    cannot help there: `'2026-03-01'` alone binds to VARCHAR, and only the
+    comparison against a date column — which needs the real schema — makes it a
+    date. Two engine quirks ride along on purpose: `'epoch'` and `'infinity'`
+    cast to dates. The first *is* a frozen date; the second is not, and refusing
+    to cache the rare query using it costs a slow answer, which is the side
+    ADR-009 already chose.
+    """
+    _text, tree = _statement_and_tree(sql)
+    found: list[str] = []
+    literals: list[str] = []
+    seen: set[str] = set()
+
+    def visit(node: dict[str, Any]) -> bool:
+        value = node.get("value")
+        # The field it carries, not its node type — see `_collect`: keying a
+        # check on the type is what let `SHOW ALL TABLES` past two empty
+        # allow-lists.
+        if isinstance(value, dict) and "is_null" in value:
+            literal = value.get("value")
+            if isinstance(literal, str) and literal not in seen:
+                seen.add(literal)
+                literals.append(literal)
+            return False
+        fixed = _is_fixed_point_in_time(node)
+        if fixed is not None and fixed not in seen:
+            seen.add(fixed)
+            found.append(fixed)
+            return True  # maximal: its children are the pieces of this one date
+        return False
+
+    _walk_expressions(tree, visit)
+
+    if literals:
+        with _parser_lock:
+            con = _parser()
+            for literal in literals:
+                row = con.execute(
+                    "SELECT TRY_CAST(? AS DATE) IS NOT NULL", [literal]
+                ).fetchone()
+                # A one-row scalar SELECT never returns nothing, so this branch is
+                # unreachable through DuckDB and a mutation of it stays green. It
+                # is written this way because `fetchone` is typed as optional and
+                # the direction this guard fails in is not a detail: "no answer"
+                # must read as *pin it* (one lost cache hit), never as "not a
+                # date" (a frozen question under the seal).
+                if row is None or row[0]:
+                    found.append(repr(literal))
+    return tuple(found)
+
+
+# Clauses whose select lists never become an answer. An `EXISTS (SELECT 1 …)`
+# is a semi-join, and its `SELECT 1` is a placeholder every SQL dialect writes —
+# the first version of `invented_outputs` walked into it and refused the idiom
+# outright (found by a blind pass, 2026-08-05). A subquery under a predicate
+# contributes a truth value; the answer is decided by the select lists outside.
+_PREDICATE_CLAUSES: frozenset[str] = frozenset(
+    {"where_clause", "having", "qualify", "condition"}
+)
+
+
+def _reads_data(node: dict[str, Any], depth: int = 0) -> bool:
+    """Whether this output expression is decided by the ledger.
+
+    A **positive** test, and that is the whole design. The first version asked
+    the opposite question — *does it fail to bind on its own?* — and treated
+    failure as proof of reading data. A blind pass turned that around with
+    `row_number() OVER ()`: it does not read one byte of any relation, and it
+    was enough to certify a select list of invented numbers as ledger-decided.
+    Absence of evidence had been wired up as evidence.
+
+    Three things count, each because the ledger decides them:
+
+    * a **column** — a bare identifier that does *not* bind with an empty
+      catalog (one that does is a built-in like `current_date`);
+    * a **star**, spotted by the field it carries (`exclude_list`) rather than
+      by its node type, for the reason in `_collect`;
+    * an **aggregate**, from the catalog. `count(*)` binds happily with no
+      `FROM` at all, so nothing else here would recognise the demo's very first
+      one-click question.
+    """
+    if depth > MAX_WALK_DEPTH:
+        raise GuardrailError(f"Query is nested too deeply (walk limit {MAX_WALK_DEPTH}).")
+    if "exclude_list" in node:
+        return True
+    name = node.get("function_name")
+    if name and str(name).lower() in _aggregate_functions():
+        return True
+    if "column_names" in node:
+        text = _expression_text(node)
+        if text is None or _bound_type(text) is None:
+            return True  # a real column: it does not resolve without a relation
+    return any(_reads_data(child, depth + 1) for child in _child_nodes(node))
+
+
+@lru_cache(maxsize=512)
+def invented_outputs(sql: str) -> tuple[str, ...]:
+    """Outputs the ledger does not decide — values fixed when the plan was written.
+
+    `relations_read` answers *"is a ledger relation named?"*, which is necessary
+    for reading the ledger and nowhere near sufficient. A blind pass built the
+    difference in one line:
+
+        SELECT 425000.00 AS total_overdue FROM invoices WHERE 1 = 0
+        UNION ALL SELECT 425000.00
+
+    `invoices` is named, the guard is satisfied, the ledger is never read, and
+    the replay prints an invented number under the freshness seal. That is the
+    *realistic* failure, not an exotic one: a tiny model that hallucinates a
+    total writes `FROM v_customer_ar` after it without being asked.
+
+    So **every** output of every answering select list must be ledger-decided.
+    Requiring only one was the second version, and it fell to the same pass:
+    pad the list with `row_number() OVER ()` and the invented number rides
+    along. Requiring all of them costs a real thing, and it is worth naming: a
+    query that labels its result (`SELECT 'total' AS label, sum(amount) …`) is
+    not cacheable. One slow answer, which is the side ADR-009 always takes.
+    """
+    _text, tree = _statement_and_tree(sql)
+    invented: list[str] = []
+
+    def visit(node: Any, depth: int = 0) -> None:
+        if depth > MAX_WALK_DEPTH:
+            raise GuardrailError(
+                f"Query is nested too deeply (walk limit {MAX_WALK_DEPTH})."
+            )
+        if isinstance(node, dict):
+            select_list = node.get("select_list")
+            if isinstance(select_list, list):
+                for entry in select_list:
+                    if isinstance(entry, dict) and not _reads_data(entry):
+                        text = _expression_text(entry)
+                        if text is not None:
+                            invented.append(text)
+            for child in _child_nodes(node, skip=_PREDICATE_CLAUSES):
+                visit(child, depth + 1)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child, depth + 1)
+
+    visit(tree)
+    return tuple(invented)
+
+
 def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     """Validate `sql` and return an executable, row-capped query.
 
@@ -560,7 +1019,7 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     """
     if not isinstance(sql, str):
         raise GuardrailError(f"Query must be a string (got {type(sql).__name__}).")
-    if not sql.strip():
+    if not _statement_text(sql):
         raise GuardrailError("Empty query.")
     # `bool` is a subclass of `int`, and it is checked first because it is the
     # one that fails *quietly*: `max_rows=True` formatted as `LIMIT 1` and
@@ -580,10 +1039,7 @@ def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     # "SELECT 1; ; " as one statement and a bare ";" as none, so both the
     # cosmetic case and the empty case are decided by the parser. A ";" alone
     # is refused by the count below rather than by a length check on text.
-    stmt = sql.strip()
-
-    _single_statement(stmt)
-    tree = _syntax_tree(stmt)
+    stmt, tree = _statement_and_tree(sql)
 
     tables: set[str] = set()
     functions: set[str] = set()

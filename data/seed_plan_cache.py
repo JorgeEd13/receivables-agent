@@ -19,6 +19,8 @@ image ships pre-warmed. Requires ``plan_cache_enabled`` (the default).
 
 from __future__ import annotations
 
+from typing import Any
+
 # Representative of what a reviewer actually types at the demo: the aging / DSO /
 # top-overdue / policy questions people ask of a receivables agent. Kept close to
 # the golden set so the seeded plans are the ones most likely to be hit.
@@ -39,6 +41,40 @@ SEED_QUESTIONS: list[str] = [
 ]
 
 
+def rejection_reason(plan: Any) -> str | None:
+    """Why this curated plan must not be baked into the image, or ``None``.
+
+    The same two conditions ``plan_from_messages`` applies on the live warm path:
+    guard-valid **and** honest to replay. Both are *called*, not restated — this
+    file used to carry a ``_validated`` closure whose comment said it "mirrors"
+    the warm path, and a mirror is a copy that agrees until it doesn't (ADR-014,
+    R1-C12). A curated plan that pins a date would otherwise seed cleanly and
+    then be refused at replay: a one-click chip that silently falls through to
+    the slow model, which is the exact failure the curated corpus exists to
+    prevent.
+
+    Module level, not a closure inside ``seed_curated``, because the version
+    inside the closure had no seam a test could reach — and an untested third
+    copy of a rule is how the rule drifts.
+    """
+    from src.agent.plan_cache import freshness_violation
+    from src.agent.sql_guard import GuardrailError, guard_query
+
+    for step in plan.steps:
+        if step.tool == "query_ledger":
+            sql = step.args.get("sql")
+            if not isinstance(sql, str):
+                return "query_ledger step has no SQL"
+            try:
+                guard_query(sql)
+            except GuardrailError as exc:
+                return f"guard: {exc}"
+            unfit = freshness_violation(sql)
+            if unfit is not None:
+                return f"freshness: {unfit}"
+    return None
+
+
 def seed_curated() -> int:
     """Write the hand-authored plans (``data/curated_plans.py``) into the cache.
 
@@ -50,8 +86,7 @@ def seed_curated() -> int:
     import chromadb
     from data.curated_plans import curated_plans
 
-    from src.agent.plan_cache import Plan, get_plan_cache
-    from src.agent.sql_guard import GuardrailError, guard_query
+    from src.agent.plan_cache import get_plan_cache
     from src.core.config import get_settings
     from src.rag.embeddings import default_embedding_function
 
@@ -68,24 +103,11 @@ def seed_curated() -> int:
         similarity_threshold=settings.plan_cache_threshold,
     )
 
-    def _validated(plan: Plan) -> bool:
-        # Mirror plan_from_messages' guarantee: every query_ledger SQL is read-only
-        # and guard-valid before it can be cached.
-        for step in plan.steps:
-            if step.tool == "query_ledger":
-                sql = step.args.get("sql")
-                if not isinstance(sql, str):
-                    return False
-                try:
-                    guard_query(sql)
-                except GuardrailError:
-                    return False
-        return True
-
     written = 0
     for question, plan in curated_plans().items():
-        if not _validated(plan):
-            print(f"  ✗ REJECTED (guard) — not cached: {question}")
+        rejection = rejection_reason(plan)
+        if rejection is not None:
+            print(f"  ✗ REJECTED ({rejection}) — not cached: {question}")
             continue
         cache.warm(question, plan)
         written += 1
