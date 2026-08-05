@@ -240,6 +240,17 @@ tests instead of the code, **4 of 6** mutations stay green.
 > changes **runtime behaviour** (the dedup key), so the live demo is no longer behind only on
 > tests and docs — there, two questions differing inside a string literal still collapse into
 > one, and the second is answered with the first's rows.
+>
+> **Re-measured 2026-08-05 after `R1-C15`: 74.** Last actual deploy: **2026-07-08**, so *nothing*
+> from the R1 audit is live. What that now means for a visitor, in the order it would be noticed:
+> the three policy-only one-click chips still answer *"the query was re-run live against the
+> ledger, so the numbers are current"* over **zero** executed SQL (fixed here today, not there);
+> a question sitting between two plans is still answered by a neighbour (`R1-C13`); a broken cache
+> entry can still surface as an error rather than a slow answer (`R1-C14`); and the guard is still
+> the pre-ADR-022 string scanner. **This is the largest open gap in the project and it is not a
+> code problem** — the cherry-pick cannot even be validated because checking the deploy tree out
+> fails on an LFS smudge error (`assets/logo.png`). It needs its own session, and one that starts
+> by fixing the LFS fetch, not by picking commits.
 
 > ⚠️ **Verification lesson from this session, worth more than the fix.** The lint gate was
 > reported green locally and failed in CI minutes later. The check was
