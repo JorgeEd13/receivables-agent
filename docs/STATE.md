@@ -1108,6 +1108,93 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     rows"` prints the number of rows *shown*, not the total, so it implies a truncation that did
     not happen; and the literal `25` is unrelated to the `max_rows` cap that actually truncates.
     Changing 25 to 1000 stays green.
+- **Cleanup, low priority (queued 2026-08-09, curated-data pass over `data/curated_plans.py`,
+  `data/seed_plan_cache.py`, `tests/test_plan_cache.py`):** ten items. The first pass could not
+  run the suite, so every item below was found by **reading** and carried no measured
+  green/red count. **Addendum 2026-08-09 (second pass, suite runnable):** the last two items —
+  the ambiguity geometry and the duplicated `dim` default — are now **measured by mutation**
+  and say so inline; the tenth item did not exist before that measurement. Items one through
+  eight are unchanged and remain reading-only findings. None is a public false claim about the
+  product or an externally reachable hole; the first is the only one that touches prose a
+  contributor would follow.
+  - **Two comments swear a lockstep that does not hold, and name a list nobody owns.**
+    `web/src/App.jsx` L6 says `SUGGESTIONS` must mirror `data/seed_plan_cache.py`;
+    `data/seed_plan_cache.py` L28–31 says `SUGGESTIONS` must be a subset of `SEED_QUESTIONS`.
+    Neither is true: `"Top 5 customers by overdue balance in each aging bucket"` is in
+    `SUGGESTIONS` (5 entries) and in `CURATED_PLANS` (12 entries) and **absent from
+    `SEED_QUESTIONS`** (8 entries). The real invariant — every chip is a curated question — is
+    owned by `test_curated_questions_match_ui_suggestions`, which compares against
+    `CURATED_PLANS` and is correct. `SEED_QUESTIONS` has **no reader outside its own module** —
+    its only consumer is `seed_via_model` (L141, L152), which no test exercises, so the list is
+    effectively dead code and can drift forever without a red line. Fix: point both comments at
+    `CURATED_PLANS`, or derive `SEED_QUESTIONS` from it and delete the standalone list. The
+    same comment's tail
+    (*"a paraphrase misses the 0.90 similarity threshold"*) also predates `_question_key` /
+    `_same_question` (2026-08-01), where a chip is a **key** lookup, not a distance one.
+  - **The image build accepts a partial bake.** `seed_curated` ends with
+    `return 0 if written else 1`, so — **read, not executed** — the `RUN` in `Dockerfile.hf`
+    fails only when *every* curated plan is rejected. Eleven rejected and one accepted would be
+    a green image advertising a pre-warmed cache with four of five demo chips falling through
+    to the slow model. `test_the_image_build_refuses_a_curated_plan_it_could_not_replay`
+    narrows this but does **not** close it: it asserts `rejection_reason(plan) is None` over
+    today's static corpus against today's guards, and never calls `seed_curated()` nor looks at
+    an exit code. Anything that drops a plan for a reason `rejection_reason` does not model —
+    `cache.warm` raising, or the image build's environment differing from the test's — still
+    exits 0 with no test red anywhere. One line closes it:
+    `written == len(curated_plans())`. Verify by running the seeder against a deliberately
+    poisoned corpus and reading `$?`; that measurement has not been made.
+  - **The seeder's module docstring and ADR-012 describe only the model path.** Both show
+    `python -m data.seed_plan_cache`; `Dockerfile.hf` L111 and `scripts/hf_entrypoint.sh` L80
+    run `--curated`, which needs no provider. A reader following the ADR reproduces the slow
+    build the curated corpus was created to remove.
+  - **`rejection_reason(plan: Any)` gives away a type for free.** The `Any` avoids a top-level
+    import of `Plan`, but the file already has `from __future__ import annotations`, so the
+    annotation is a string and costs nothing. Annotate it `Plan`.
+  - **`seed_via_model` reaches into `agent._cache`** (private attribute of `CachedAgent`).
+    Nothing in CI runs that path (it needs a provider), so a rename there breaks silently until
+    a human runs the dev path.
+  - **One-character substring oracles in the replay tests.** Three `assert "2" in …`
+    (`test_plan_cache.py` L258, L318, L355) plus the sibling `assert "3" in second.reply`
+    (L264), which carries the same weakness. The rendering is deterministic (`**n**: 2`), so
+    these can be equalities against the rendered tail; today they pass only because
+    `_FRESHNESS_CLAIMS` and the `"_(Answered from a cached plan — …)_"` wrapper
+    (`plan_replay.py` L60–65, L127) contain no digit — a fact of the current strings, not a
+    property anything enforces.
+  - **`test_curated_plans_are_all_guard_valid_and_replayable` does not replay anything.** It
+    checks tool names against `REPLAYABLE_TOOLS` and runs `guard_query`; it opens no ledger and
+    never calls `freshness_violation`. The real owners are
+    `test_every_curated_plan_replays_against_the_real_ledger` and, for freshness,
+    `test_replay_claims.py`. Not a hole — a name that teaches the wrong coverage. Rename to
+    `..._are_all_guard_valid_and_well_formed`.
+  - **Two ADR-013 tests live in `tests/test_plan_cache.py`** (L536–586).
+    `test_select_prompt_uses_brief_for_constrained_tiny_model` imports nothing from
+    `plan_cache` and tests `graph.select_prompt`. Anyone looking for prompt-tier coverage will
+    look in `test_constrained.py`, not find it, and write it a second time.
+  - **The ambiguity tests' geometry has no anchor.** Six tests are calibrated against distances
+    measured with `DeterministicEmbeddingFunction(dim=256)` — 0.857, 0.926, 0.935/0.802, 0.164,
+    0.143 — all of which live in **comments**. No test pins `dim`; the fixture calls the
+    constructor with no argument. Changing that default (an implementation detail nobody would
+    treat as a rule) silently moves the space six correctness tests measure. Pin the dimension
+    in the `embedding_function` fixture so the assumption and the calibration sit together.
+    **Measured 2026-08-09:** flipping the default to 512 leaves the suite at **449 green**,
+    while the largest distance shift across the 66 curated-corpus pairs is **0.126** (0.174 at
+    dim=4096) — wider than the **0.05** margin three of those six tests use as their rule. The
+    space moves enough to change a verdict; the suite does not notice because the pairs it
+    exercises are not the pairs that moved. Note for whoever fixes this: `dim` reaches the
+    geometry only through hash collisions, so the sharper missing anchor is on the **tokeniser**
+    (`_TOKEN_RE`, which lowercases and drops punctuation) — that is what decides the shared-word
+    sets the distances are made of. The tokeniser mutation has **not** been run.
+  - **Two independent literals for the same `dim` default** (`src/rag/embeddings.py`).
+    `__init__(self, dim: int = 256)` at L40 and `config.get("dim", 256)` inside
+    `build_from_config` at L69 hard-code the same number separately. **Measured 2026-08-09:**
+    set them to disagree (constructor 512, fallback 256) and the suite stays at **449 green** —
+    nothing compares the two. Today the path is narrow because `get_config` always emits a
+    `dim` key, so a persisted collection round-trips correctly; the exposure is a collection
+    baked by an older version, or any future edit to `get_config`. The failure mode is not an
+    exception but a **different vector space answering confidently**, which is the ADR-009
+    Amendment 2026-08-01 (`R1-C13`) failure mode one layer down. Fix: one module-level constant
+    both sites read. This is the third instance of two-copies-of-one-owner in this repo after
+    ADR-014 (`R1-C12`, whitespace strip) and `R1-C14` (question normalisation).
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
