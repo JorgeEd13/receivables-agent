@@ -1184,6 +1184,16 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     geometry only through hash collisions, so the sharper missing anchor is on the **tokeniser**
     (`_TOKEN_RE`, which lowercases and drops punctuation) — that is what decides the shared-word
     sets the distances are made of. The tokeniser mutation has **not** been run.
+    **Addendum 2026-08-12 — the tokeniser mutation was run, and this recommendation is wrong.**
+    Dropping digits from `_TOKEN_RE` (`[a-z0-9]+` → `[a-z]+`) leaves the suite at **449 green**.
+    Reason: `tests/test_plan_routing.py`, which owns the curated-corpus geometry
+    (`AMBIGUITY_MARGIN`, the `(12, 66)` anchors, the walls at 0.0482/0.1589), does **not** use
+    `DeterministicEmbeddingFunction` at all — it imports `default_embedding_function`, the
+    production MiniLM. The tests that do use the hashing embedder spell their numbers as words
+    (`"how many customers…"`, `"top five…"` / `"top ten…"`), so no digit ever crosses it. So both
+    tokeniser and `dim` are green for the same structural reason, and neither is the sharp anchor
+    this note predicted. What remains genuinely unpinned is the `dim` **literal pair** in the
+    next bullet, which has a real failure mode.
   - **Two independent literals for the same `dim` default** (`src/rag/embeddings.py`).
     `__init__(self, dim: int = 256)` at L40 and `config.get("dim", 256)` inside
     `build_from_config` at L69 hard-code the same number separately. **Measured 2026-08-09:**
@@ -1195,6 +1205,58 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     Amendment 2026-08-01 (`R1-C13`) failure mode one layer down. Fix: one module-level constant
     both sites read. This is the third instance of two-copies-of-one-owner in this repo after
     ADR-014 (`R1-C12`, whitespace strip) and `R1-C14` (question normalisation).
+- **Cleanup, queued 2026-08-12 (RAG / ledger / evals pass, `R1-T7`):** seven findings, each
+  measured, none fixed — the study programme documents, it does not repair. None is a live public
+  falsehood or an externally reachable hole. Baseline for every measurement below: **449 green**,
+  tree restored afterwards.
+  - **T7-1 — `enable_external_access=false` has no test at all** (`src/agent/ledger.py` L28–34).
+    This is the **confidentiality** half of the guardrail: `read_only=True` blocks writes, but
+    exfiltration is a *read*, so what stops `read_csv('/etc/passwd')` at engine level is this key.
+    **Measured:** delete it → **449 green**, nothing changes colour. And it is load-bearing, not
+    decorative — probed directly with the key removed, the connection returns the contents of
+    `/etc/passwd`; with the key restored, `PermissionException: file system operations are
+    disabled by configuration`. Not urgent: `sql_guard` refuses `read_csv` before the engine sees
+    it (function allow-list, pinned against `duckdb_functions()` since `R1-C3`), so this is loss
+    of a defence-in-depth layer, not of the only gate. Fix: one test that asserts the engine
+    refuses an external read, so a cleanup PR cannot silently remove the layer.
+  - **T7-2 — the `dim` literal pair** — see the bullet above; re-confirmed by reading in this
+    pass, not re-measured (measurement budget).
+  - **T7-3 — the golden expectations are pinned by a docstring, not by a test.**
+    `evals/golden.py` ends with *"Update the expectations if `data/generate.py` or the policy doc
+    changes"* and the values were verified against `data/ledger.duckdb` on 2026-06-08. That is an
+    instruction to a human, so nothing goes red when the generator changes — the evals just start
+    measuring a world that no longer exists, and the published pass rate becomes fiction. Same
+    disease `R1-C11` closed for curated plans; the fix there was to *execute* the curated data
+    against the real artifact, and that does not exist here yet.
+  - **T7-4 — `evals/run.py` is covered by nothing, and its docstring overclaims.**
+    `tests/test_evals.py` says it covers *"everything that doesn't need an LLM"*; the pure
+    functions `_final_text` and `_tools_used` need no LLM and are untested, as are the exit
+    codes. Aggravated by their being the third byte-identical copy flagged in the 2026-07-31
+    cleanup bullet above — while the copies last, the eval harness can measure stale behaviour.
+  - **T7-5 — the heading boundary lives only in a comment** (`src/rag/chunking.py` L19–21).
+    **Measured:** relaxing `_HEADING_RE` from `^##` to `^#{2,}` (i.e. `###` also starts a section)
+    leaves **449 green**, because neither the policy document nor the chunking fixture contains a
+    `###` today. This is the mutation that most resembles a real PR ("also accept subsections").
+    The failure is not an exception: a rule splits across two chunks and the lower half loses the
+    heading that makes it citable. Fix: one fixture with a subsection.
+  - **T7-6 — the eval oracle can be relaxed from `all` to `any` unnoticed**
+    (`evals/checks.py` L30, `mentions_all`). **Measured:** the flip leaves **449 green**. The
+    three tests that exercise it all happen to use cases where the operators agree (two terms both
+    present, one term absent, empty reply); the discriminating case — **two terms, one present** —
+    is missing. Under `any`, the `credit_hold_rule` case (`["60", "credit limit"]`) passes on a
+    reply that says *"we place accounts on hold after 60 days"* and omits the credit limit, i.e. a
+    false pass entering the pass rate the README publishes. Fix: one two-term/one-present case.
+  - **T7-7 — `{"hnsw:space": "cosine"}` is written twice**, in `src/rag/index.py` L23
+    (`_COLLECTION_METADATA`, the policy collection) and `src/agent/plan_cache.py` L498
+    (`_CACHE_METADATA`, the plan cache). **Measured:** dropping the metadata from the *policy*
+    collection leaves **449 green** — unsurprising, since 13 chunks under a hashing embedder rank
+    correctly under any sane metric. ⚠️ **The plan-cache one was NOT measured in this pass**
+    (6-mutation budget spent), and it is the one the older 382-test note was really about; it is
+    load-bearing there, because with normalised vectors `l2` is exactly 2× cosine distance and
+    `AMBIGUITY_MARGIN = 0.10` is calibrated against walls measured at 0.0482 and 0.1589. Flagged
+    here explicitly as *not measured* so the next pass picks it up. Fourth instance of
+    two-copies-of-one-decision in this repo, and the most benign of the four — the collections are
+    legitimately distinct and nothing requires them to share a metric.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
