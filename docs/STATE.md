@@ -1063,6 +1063,15 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
   the copies — while the duplication lasts, the evals can silently measure stale
   behavior if the canonical helpers change. Bonus while there: make `final_text`
   filter content blocks by `type == "text"`.
+  **Correction 2026-08-12 (blind claim audit): "byte-identical" is false.** The
+  copies in `evals/run.py` are named `_final_text` / `_tools_used` (leading
+  underscore), carry no docstring, and drop the `# some providers return content
+  blocks` comment. Verified by `inspect.getsource` comparison: not identical,
+  and not identical after stripping whitespace either. The accurate description
+  is **logic-equivalent duplicates under different names**. The cleanup and its
+  rationale are unaffected — divergence risk is the same — but the wording had
+  been repeated unchecked since 2026-07-31 and is corrected here rather than
+  rewritten away.
 - **Cleanup, low priority (queued 2026-07-31, turn-control pass):** five small items in
   `src/agent/turn_control.py` / `tests/test_turn_control.py`, none of them a guarantee
   hole — each was measured to leave the suite fully green.
@@ -1188,8 +1197,10 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     Dropping digits from `_TOKEN_RE` (`[a-z0-9]+` → `[a-z]+`) leaves the suite at **449 green**.
     Reason: `tests/test_plan_routing.py`, which owns the curated-corpus geometry
     (`AMBIGUITY_MARGIN`, the `(12, 66)` anchors, the walls at 0.0482/0.1589), does **not** use
-    `DeterministicEmbeddingFunction` at all — it imports `default_embedding_function`, the
-    production MiniLM. The tests that do use the hashing embedder spell their numbers as words
+    `DeterministicEmbeddingFunction` at all — it imports `default_embedding_function`, i.e. the
+    same embedder production uses (ChromaDB's `DefaultEmbeddingFunction`; that this is the bundled
+    ONNX all-MiniLM-L6-v2 is the library's documented default, not something measured here).
+    The tests that do use the hashing embedder spell their numbers as words
     (`"how many customers…"`, `"top five…"` / `"top ten…"`), so no digit ever crosses it. So both
     tokeniser and `dim` are green for the same structural reason, and neither is the sharp anchor
     this note predicted. What remains genuinely unpinned is the `dim` **literal pair** in the
@@ -1215,10 +1226,16 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     **Measured:** delete it → **449 green**, nothing changes colour. And it is load-bearing, not
     decorative — probed directly with the key removed, the connection returns the contents of
     `/etc/passwd`; with the key restored, `PermissionException: file system operations are
-    disabled by configuration`. Not urgent: `sql_guard` refuses `read_csv` before the engine sees
-    it (function allow-list, pinned against `duckdb_functions()` since `R1-C3`), so this is loss
-    of a defence-in-depth layer, not of the only gate. Fix: one test that asserts the engine
-    refuses an external read, so a cleanup PR cannot silently remove the layer.
+    disabled by configuration`. Not urgent: `guard_query` refuses `read_csv` before **execution**
+    (function allow-list, pinned against `duckdb_functions()` since `R1-C3`; verified directly —
+    `GuardrailError: Function(s) not in allow-list: read_csv`), so this is loss of a
+    defence-in-depth layer, not of the only gate. Two qualifiers recorded by the 2026-08-12 claim
+    audit, both narrowing the reassurance: the payload **does** reach the DuckDB *parser*, since
+    `guard_query` itself validates via `json_serialize_sql` — "before the engine sees it" would be
+    wrong, "before it executes" is right; and the refusal was exercised at `guard_query` level,
+    not end-to-end through the agent tool path, so "unreachable" holds only as far as every path
+    really does go through `guard_query`. Fix: one test that asserts the engine refuses an
+    external read, so a cleanup PR cannot silently remove the layer.
   - **T7-2 — the `dim` literal pair** — see the bullet above; re-confirmed by reading in this
     pass, not re-measured (measurement budget).
   - **T7-3 — the golden expectations are pinned by a docstring, not by a test.**
@@ -1231,8 +1248,10 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
   - **T7-4 — `evals/run.py` is covered by nothing, and its docstring overclaims.**
     `tests/test_evals.py` says it covers *"everything that doesn't need an LLM"*; the pure
     functions `_final_text` and `_tools_used` need no LLM and are untested, as are the exit
-    codes. Aggravated by their being the third byte-identical copy flagged in the 2026-07-31
-    cleanup bullet above — while the copies last, the eval harness can measure stale behaviour.
+    codes. Aggravated by their being the third copy flagged in the 2026-07-31 cleanup bullet
+    above — logic-equivalent to `src/agent/message_utils.py`, not byte-identical (see the
+    correction on that bullet); while the copies last, the eval harness can measure stale
+    behaviour.
   - **T7-5 — the heading boundary lives only in a comment** (`src/rag/chunking.py` L19–21).
     **Measured:** relaxing `_HEADING_RE` from `^##` to `^#{2,}` (i.e. `###` also starts a section)
     leaves **449 green**, because neither the policy document nor the chunking fixture contains a
