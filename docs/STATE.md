@@ -1396,6 +1396,88 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     `test_chat_forwards_history_then_new_message` checks roles and the last message but not the
     history contents; `create_server` and `main` have no tests (testing the core
     `run_guarded_query` is the right call — recorded as declared coverage, not a defect).
+- **Cleanup, queued 2026-08-12 (config / hardware pass, `R1-T9`):** seven findings over
+  `src/core/config.py`, `src/core/hardware.py` and `tests/test_hardware.py`, none fixed — the
+  study programme documents, it does not repair. Baseline for every measurement: **449 green**,
+  tree restored afterwards. A control mutation (dropping `qwen2.5:7b` to quality 3) produced
+  **3 reds**, so the green results below are absence of an owner, not a dead suite. None is a
+  live public falsehood or an externally reachable hole.
+  - **T9-1 — `test_name_matching_is_tag_tolerant` does not test tag tolerance**
+    (`tests/test_hardware.py` L87–93). The test passes `["qwen2.5:7b"]` against the catalog's
+    `"qwen2.5:7b"` — byte equality — so it exercises no normalisation at all. **Measured:**
+    replacing `_normalize`'s body with `return name.lower()` leaves the suite at **449 green**;
+    the test would pass with the identity function. The cost is that it lends apparent coverage
+    to T9-2. Fix: make the payload asymmetric (`["qwen2.5"]` against `"qwen2.5:7b"`), which also
+    turns it into a red for T9-2.
+  - **T9-2 — `_normalize` never strips a tag, and its docstring says it does**
+    (`src/core/hardware.py` L245–247). The ternary is inverted into a no-op:
+    `name.split(":")[0].lower() if ":" not in name else name.lower()` — when there is no colon
+    the split has nothing to cut, and when there is one the tag survives. The function is
+    `name.lower()` with extra steps, while the docstring promises `qwen2.5 == qwen2.5:7b`.
+    **Measured** by equivalence: substituting `return name.lower()` keeps **449 green**.
+    Concrete consequence: `ollama pull llama3.1` registers as `llama3.1:latest`, which never
+    matches the catalog's `llama3.1:8b`, so an already-pulled model is reported as `needs pull`
+    and `catalog_quality` returns `None` for it (no constrained-decoding shim). Fix is one line
+    (`name.split(":")[0].lower()`), but it must land together with T9-1 or nothing pins it.
+  - **T9-3 — the floor model is three literals with two different values.** The same decision
+    lives in `_CATALOG[0].name = "qwen2.5:0.5b"` (`src/core/hardware.py` L63),
+    `best or "qwen2.5:0.5b"` (`src/agent/providers.py` L57) and `FALLBACK_MODEL="qwen2.5:1.5b"`
+    (`scripts/hf_entrypoint.sh`). The first two agree by accident; the third already differs.
+    **Measured:** renaming the catalog entry to `"qwen2.5:0.5b-instruct"` leaves **449 green**,
+    after which `catalog_quality("qwen2.5:0.5b")` returns `None`, `should_constrain` reads
+    unknown as "deliberate choice" and returns `False`, and the weakest catalog model runs
+    **native tool-calling** — which ADR-011 measured at roughly 1/5 usable calls for a 0.5B
+    model. Fifth instance of two-copies-of-one-decision in this repo (after `R1-C12`, `R1-C14`,
+    the `embeddings.py` `dim` pair and the `T8-11` message-assembly pair). The antidote already
+    exists here: `R1-C3` pins `MAX_ROWS_CEILING` against the `Settings` bound. Fix: export a
+    `FLOOR_MODEL` from `hardware` and assert the shell literal against `_CATALOG[0].name`.
+  - **T9-4 — no recommendation test exercises the CPU-only path** (`tests/test_hardware.py`
+    L61–93). All four `recommend_model` tests construct profiles **with** `vram=`, so
+    `requirement_for` always reads `vram_gb`. CPU-only is precisely the Hugging Face free tier
+    (2 vCPU) that ADR-010 exists to serve. **Measured:** setting `llama3.3:70b`'s `ram_gb` from
+    42.0 to 1.0 leaves **449 green**; the paired control shows the other side — a change
+    affecting ordering on the GPU route turned
+    `test_falls_back_to_best_that_would_fit_when_nothing_downloaded` red. So `vram_gb` has an
+    owner and `ram_gb` has none. Understating any RAM figure would have the recommender propose
+    a model the box cannot load, at boot, before anything is served. Fix: one
+    `_profile(vram=None)` case in the recommendation tests.
+  - **T9-5 — the provider-fallback default has no owner** (`src/core/config.py` L34). All seven
+    test sites touching `fallback_provider` (`tests/test_provider_fallback.py` L104–209) pass the
+    value explicitly, one of them passing `fallback_provider=None`; none asserts the default.
+    (`primary_provider` has three further explicit sites in `tests/test_plan_cache.py` L551–558,
+    also without a default assertion.) **Measured:** changing the default to `None`
+    leaves **449 green**, and with `None` `src/agent/graph.py` L115 never builds the
+    `RunnableWithFallbacks` — the whole ADR-004 redundancy is gone. `R1-C7` wrote 13 tests for
+    the fallback *mechanism* and none for it being *enabled*. The module docstring calls provider
+    order "the one knob that flips between environments". Fix: assert the shipped defaults of
+    `primary_provider`/`fallback_provider` in one test.
+  - **T9-6 — the "is this a GPU" threshold is attacked from one side only**
+    (`src/core/hardware.py` L93, `tests/test_hardware.py` L46–50). `has_gpu` uses `> 1.0` and the
+    only test uses 0.5; there is no case at 1.0, 1.5 or 2.0. **Measured:** moving the threshold
+    to `> 4.0` leaves **449 green**, and `test_skips_downloaded_model_that_does_not_fit` (a 2 GB
+    VRAM profile) stays green **via a different path** — it becomes a CPU profile, effective
+    memory goes from 2.0 to 3.2, and the expected answer is unchanged. Every 2–4 GB laptop GPU
+    would silently switch to deciding on 80% of RAM. Fix: cases just above and just below.
+  - **T9-7 — small, grouped:** the CLI's `--base-url` reads `os.getenv` directly rather than
+    `Settings` (`src/core/hardware.py` L353) — deliberate, so the diagnostic runs without
+    `pydantic`, but it is a fourth copy of the `http://localhost:11434` default and a `.env`
+    override is honoured by the app and ignored by the tool; the `Current (.env)` label (L402,
+    L404) prints `os.getenv("OLLAMA_MODEL")`, i.e. the process environment, so a variable that
+    lives only in the `.env` file makes the label lie; the `"(80% of RAM)"` legend (L117) is a
+    second copy of the `0.80` factor (L104); the catalog tie-break between `qwen2.5:7b` and
+    `llama3.1:8b` (both quality 7) is line order and nothing pins it; catalog descriptions
+    disagree with their own numbers (`qwen2.5:7b` says "~10 GB RAM", `ram_gb` is 5.0);
+    **measured** — `m["name"]` in `list_downloaded_models` (L315) is a direct index, so one
+    malformed entry discards the whole list through `except Exception` (a local server returning
+    `[{"name":"llama3.1:8b"},{"model":"oops"},{"name":"qwen2.5:7b"}]` yields `[]`; same family as
+    `R1-C14`'s "`x or {}` is not a type check"); **measured** — the embedder filter (L319) is an
+    asymmetric deny-list, `"embed" not in n` being case-sensitive while `"minilm" not in n.lower()`
+    is not (payload `["nomic-EMBED-text","all-MiniLM-L6","keepme"]` returns
+    `['nomic-EMBED-text','keepme']`); **measured** — only the first GPU is read
+    (`splitlines()[0]`, L215): a stub `nvidia-smi` emitting `"GPU-A, 8192\nGPU-B, 24576"` yields
+    `('GPU-A', 8.0)`, which is correct for the decision at hand but undocumented; and
+    `monkeypatch.setattr(providers, "AUTO_MODEL", AUTO_MODEL)` (test L109) replaces a value with
+    itself.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
