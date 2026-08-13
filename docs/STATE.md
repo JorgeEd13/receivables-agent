@@ -1276,6 +1276,126 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     here explicitly as *not measured* so the next pass picks it up. Fourth instance of
     two-copies-of-one-decision in this repo, and the most benign of the four — the collections are
     legitimately distinct and nothing requires them to share a metric.
+- **Cleanup, queued 2026-08-12 (API / MCP / schemas pass, `R1-T8`):** eleven findings, each
+  measured unless marked otherwise, none fixed — the study programme documents, it does not
+  repair. Baseline for every measurement below: **449 green**, tree restored afterwards. None is
+  a live public falsehood: ADR-007 already declares that the UI-baked key is visible to anyone
+  inspecting the bundle, and `DEPLOY.md` publishes the demo key itself. One item (T8-1) is an
+  externally reachable unhandled exception, but it grants no access — see the reasoning there.
+  - **T8-1 — a non-ASCII `X-API-Key` returns 500 instead of 401** (`src/api/app.py` L67).
+    `secrets.compare_digest` on two `str` requires both to be pure ASCII and raises `TypeError`
+    otherwise. Starlette decodes header values as latin-1, so any byte ≥ 0x80 in the header
+    passes the `not key` check and then explodes inside the compare. **Measured** with a
+    throwaway probe: `compare_digest("café", "test-key")` → `TypeError: comparing strings with
+    non-ASCII characters is not supported`; the same request through `TestClient` with the
+    header sent as **bytes** propagates the exception; with `raise_server_exceptions=False`
+    (what a deployed uvicorn does) the response is **500**. ⚠️ The first attempt sent the header
+    as a `str` and **httpx refused to encode it** — a refusal in the client library, not in the
+    protocol or the server, which would have produced a false "not reachable" verdict. HTTP
+    headers on the wire are bytes. Not urgent: the caller is not authenticated either way and
+    gains no access; the cost is log noise, 5xx alerting, and an unhandled path. Note the
+    irony, measured as mutation E2: replacing `compare_digest` with `==` **removes** this bug.
+    Fix: compare encoded bytes — `secrets.compare_digest(key.encode(),
+    settings.app_api_key.encode())` — which is constant-time **and** byte-safe (probed: `False`
+    for the wrong pair, `True` for the right one, no raise).
+  - **T8-2 — the MCP server shares one DuckDB connection across all tool calls**
+    (`mcp_server/server.py` L85, with `src/agent/ledger.py` `run_query`). `create_server` opens
+    one connection and closures it into the tool; `run_query` does `cur = con.execute(sql)` then
+    `cur.fetchall()`, and in DuckDB `con.execute()` returns the connection itself, so those are
+    two steps over one shared object. FastMCP runs sync tools in a threadpool, so concurrent
+    calls can interleave and one client can receive another's rows. ⚠️ **NOT MEASURED** —
+    reading only, recorded as a grounded hypothesis, not a confirmed defect (the 6-mutation
+    budget was spent and reproducing a race needs a harness this pass did not have). What is
+    unknown: whether DuckDB's C layer serialises execute/fetch enough to close the window.
+    Fix candidates: a connection per call, or `con.cursor()`.
+  - **T8-3 — the streaming endpoint's central guarantee has no owner** (`src/api/app.py`
+    L129–130). The comment says *"never leave the stream half-open"*. **Measured:** delete the
+    whole `try/except` and the suite stays at **449 green**. Scope qualifier from the claim
+    audit: an exception *is* exercised on the stream path one layer down —
+    `tests/test_turn_control.py` L507 raises `GraphRecursionError` inside the stub feeding
+    `CachedAgent.astream`. What has no owner is the **API-level** backstop, the outer catch that
+    exists for when the inner layer does not hold. Consequence: the generator ends, the client
+    gets a truncated body with no
+    `[DONE]`, and the UI (which reads to the end of the reader) spins forever. There is no HTTP
+    status left to send, because `200 OK` went out with the first byte. Note the asymmetry: the
+    non-streaming route does not need this guarantee (an exception becomes a 500 that FastAPI
+    handles), while the streaming route depends on it entirely. Fix: a stub whose `astream`
+    raises on the second event, asserting an `error` event followed by `[DONE]`.
+  - **T8-4 — the route/mount order is a guarantee held only by line position** (`src/api/app.py`
+    L139–142). `app.mount("/", StaticFiles(...))` matches every path and Starlette matches routes
+    in registration order, so the API survives because those lines sit last. **Measured:** move
+    the block to just after `FastAPI(...)` → **10 red**, all of `tests/test_api.py`, failing with
+    `405 Method Not Allowed` (StaticFiles matched the path and refused the POST). ⚠️ But the
+    mount is conditional on `web/dist`, which is git-ignored, so **in CI the same mutation is a
+    no-op** — that half is *reasoning, not measurement*: the suite was not run with the directory
+    removed. A "group the config together" refactor therefore deletes the API and CI approves the
+    PR. Fix: a fixture that builds the app with a temporary `dist` present and asserts
+    `/api/health` still answers.
+  - **T8-5 — no input ceiling has an owner, and there is no rate limit** (`src/api/schemas.py`
+    L27–28). `max_length=4000` and `max_length=50` are the only context budget and the only cost
+    boundary on the most expensive endpoint. **Measured:** multiply both by a thousand
+    (4_000_000 and 100_000) → **449 green**; `grep -rn "4000\|max_length" tests/` returns
+    nothing. Honest framing: the missing rate limit is not a regression, it is a control that
+    never existed, and a synthetic-data demo survives without it — what it should not do is ship
+    without either.
+  - **T8-6 — the role allow-list is pinned by an enumerated guard** (`src/api/schemas.py` L15,
+    `tests/test_api.py` L107–113). `Role = Literal["user", "assistant"]` is the boundary defence
+    against a client injecting a system prompt through `history`. Its only owner tests **one**
+    value, `"system"`. **Measured** by probe: the roles accepted today are exactly
+    `["user", "assistant"]` (of user/assistant/system/tool/function/developer), so the policy is
+    correct now — but widening the `Literal` with `"tool"` leaves the existing test green. Same
+    disease `R1-C9` closed elsewhere in this repo by comparing the whole surface. Fix:
+    `assert set(get_args(Role)) == {"user", "assistant"}`.
+  - **T8-7 — four of the five MCP tests do not run in CI, and none asserts *why* a payload was
+    refused** (`tests/test_mcp.py`). (a) `data/ledger.duckdb` is git-ignored and four tests carry
+    `@needs_ledger`, so CI **skips** them and a skip reports as green. (b) The refusal tests
+    assert only `error == "rejected_by_guardrail"`, but the connection is `read_only=True` and
+    `secrets` does not exist — the **engine** would refuse those payloads anyway, so the tests do
+    not discriminate which layer refused and would stay green with the guard disabled. Measured
+    by reading plus the `skipif` marker; on a machine with the ledger they do run (that is why
+    mutation E5 went red). Mitigating and worth stating: `tests/test_tool_error_contract.py`
+    (written during `R1-C5`) builds an in-memory table, runs in CI, and does drive the MCP
+    surface end to end — mutation E6 confirmed it with exactly 1 red. So the lesson already
+    exists in a neighbouring file and was not propagated here. (c) Smaller, same family: the
+    `con` fixture calls `duckdb.connect(...)` directly instead of `connect_readonly`, i.e.
+    without `HARDENED_CONFIG` / `enable_external_access=false` — the suite meant to prove
+    security parity tests against a *less* hardened connection than production opens. Compounds
+    `T7-1`.
+  - **T8-8 — `truncated` is an inference presented as a fact** (`mcp_server/server.py` L75).
+    The guard wraps the query in `LIMIT max_rows`, and the code infers "there was more" from
+    "we got the maximum". A result of exactly `max_rows` rows is reported as truncated when it
+    was not. **Measured (E5):** the field does have an owner — flipping `>=` to `>` gives 1 red
+    (`test_row_cap_truncates`) — but that test uses a cap of 5 against 13,000 customers, far from
+    the boundary; the case `len(records) == max_rows == total` is untested. Errs toward warning,
+    which is the safe direction. Fix costs one row: ask for `max_rows + 1` and return `max_rows`.
+  - **T8-9 — the MCP tool docstring is a prompt, and nothing pins it** (`mcp_server/server.py`
+    L90–95). FastMCP publishes it as the tool description in the protocol, so it is the text the
+    *other side's* model reads to decide how to call. It promises SELECT/WITH-only over
+    allow-listed relations, single statement, row cap. **Measured** by grep: no test mentions it,
+    so if `guard_query`'s policy changes the description keeps advertising the old one and
+    nothing goes red. Same class of surface as `schema_hints.py`, where `R1-C8` did add a
+    dedicated test. Failure mode is efficiency (more or fewer client retries), not security.
+  - **T8-10 — `/api/health` answers `"ok"` with the agent down** (`src/api/app.py` L82–84,
+    `src/api/schemas.py` L38–40). `status` is a `Literal["ok"]` constant, so the route returns
+    **200 / `"ok"`** even when `agent_ready` is `False`. **Measured** by probe with
+    `agent_builder=lambda s: None`: health returns `200 {'status': 'ok', 'agent_ready': False}`
+    while `/api/chat` correctly returns `503 {'detail': 'Agent is not ready.'}` — which also
+    establishes that the 503 branch works and **has no test of its own**. Any orchestrator
+    reading the status code (the Docker `HEALTHCHECK` default, every Kubernetes probe) keeps a
+    container that answers nothing. This conflates *liveness* with *readiness*, which are
+    deliberately different probes. Fix: return 503 when not ready, or split into two routes.
+  - **T8-11 — small, grouped:** the two message-assembly lines are duplicated between `chat` and
+    `chat_stream` (fourth instance of two-copies-of-one-owner in this repo, after `R1-C12`,
+    `R1-C14` and the `embeddings.py` `dim` pair); `import pytest` appears twice in
+    `tests/test_mcp.py` (L15, L27) and `import json as _json` sits inside a function in
+    `tests/test_api.py`; `zip(..., strict=False)` in `run_guarded_query` picks the silent-truncate
+    direction where `strict=True` would cost nothing (the invariant does hold — both come from
+    the same cursor); `_jsonify` coerces `Decimal` to `float`, an undeclared precision loss in a
+    monetary domain (`str(value)` would preserve it); `test_stream_emits_tool_then_answer_events`
+    compares the first event by whole surface but the last field by field;
+    `test_chat_forwards_history_then_new_message` checks roles and the last message but not the
+    history contents; `create_server` and `main` have no tests (testing the core
+    `run_guarded_query` is the right call — recorded as declared coverage, not a defect).
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
