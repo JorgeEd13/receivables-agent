@@ -1478,6 +1478,75 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     `('GPU-A', 8.0)`, which is correct for the decision at hand but undocumented; and
     `monkeypatch.setattr(providers, "AUTO_MODEL", AUTO_MODEL)` (test L109) replaces a value with
     itself.
+- **Cleanup, queued 2026-09-02 (synthetic data generator, `R1-T10`):** seven findings over
+  `data/generate.py`, none fixed — the study programme documents, it does not repair. Baseline for
+  every measurement: **449 green**, tree restored afterwards. Shape measurements come from a
+  60-customer ledger (`python data/generate.py --customers 60`): 4,075 invoices, 3,680 payments,
+  870 communications, status mix paid 90.3% / overdue 5.6% / open 4.1%, DSO 56.3 days. A control
+  mutation (adding a sixth dunning stage `collections_handoff`) produced **1 red**
+  (`test_the_value_sets_the_hint_promises_are_what_the_ledger_holds`), so the green results below
+  are absence of an owner, not a dead suite. None is a live public falsehood or an externally
+  reachable hole.
+  - **T10-1 — `create_dimensions` takes the reference date through a module global**
+    (`data/generate.py` L403, L424, L192). `_args_as_of` is annotated without a value, assigned
+    inside `main()` under `global`, and read by `create_dimensions`, whose signature
+    (`con, customers`) does not mention it. The neighbouring `generate_facts(con, as_of)` takes it
+    as a parameter, so the file uses two conventions for the same datum. **Measured:** deleting the
+    assignment turns **16 tests into errors** and leaves 433 passing — `NameError` while the
+    `ledger` fixture builds. Consequence: `create_dimensions` cannot be called outside `main()`,
+    which is exactly what `tests/conftest.py` says it deliberately does not do. Fix: one parameter
+    and one call site.
+  - **T10-2 — the `ln_mu`/`ln_sigma` in `SEGMENTS` are a dead copy; the SQL `VALUES` owns them.**
+    L123 discards the last two tuple positions (`_, terms, inv_lo, inv_hi, _, _`) and L207–211
+    hardcodes `('enterprise', 10.5, 0.9)` and its two siblings. **Measured:** changing the
+    enterprise `ln_mu` from 10.5 to 4.0 leaves **449 green** and does not change a cent of the
+    ledger. Sixth instance of two-copies-of-one-decision in this repo (after `R1-C12`, `R1-C14`,
+    the `embeddings.py` `dim` pair, `T8-11` and `T9-3`). Fix: read the parameters from `SEGMENTS`
+    when building the `VALUES` string, or assert the two copies against each other.
+  - **T10-3 — `PAYMENT_METHODS` is a dead constant, and the `*4` index is a copy of its length**
+    (`data/generate.py` L74, L298). The constant is read nowhere in the repo; the live owner is the
+    literal list `['wire','ach','credit_card','check']` indexed by `1 + floor(random()*4)`.
+    **Measured:** `PAYMENT_METHODS = []` leaves **449 green**. Two risks stack: editing the
+    constant changes no data, and adding a method to the literal list without changing the `4`
+    makes it silently unreachable. `payments.method` is not in `PROMISED_VALUE_SETS`, unlike
+    `communications.stage`, which is why the control mutation goes red and this one does not.
+  - **T10-4 — `communications` is named a history and is a queue of open chases**
+    (`data/generate.py` L325). `WHERE i.status = 'overdue'` generates touch-points only for
+    invoices overdue **at the as-of date**, so a customer who paid late has no communication rows
+    at all. **Measured on 60 customers:** 932 of 3,680 payments (25%) landed more than 7 days after
+    the due date and **zero** have a row in `communications`; widening the filter to
+    `IN ('overdue','paid')` leaves **449 green**. `src/agent/schema_hints.py` describes the table
+    as "dunning touch-points", which invites the model to answer collection-effectiveness
+    questions the data cannot support.
+  - **T10-5 — the open/overdue boundary has no owner** (`data/generate.py` L281). The status
+    ladder uses `due_date >= as_of` for `open`. **Measured:** changing it to `>` leaves **449
+    green**, and on 60 customers **9 invoices** change category (and, through `v_invoices`, move
+    from `current` to the `1-30` aging bucket). No test exercises the boundary from either side —
+    same signature as `T9-6`. Fix: cases at `as_of - 1`, `as_of` and `as_of + 1`.
+  - **T10-6 — the SQL-side seed space is 1000 values wide and the docstring does not say so**
+    (`data/generate.py` L439, L23–25). `setseed((seed % 1000) / 1000.0)` maps 42, 1042 and -958 all
+    to `0.042` (arithmetic, not a run). The docstring's "same seed + same args => byte-comparable
+    distributions" is true in the direction it states and silent about the collision; Faker and
+    Python's `random` still receive the full integer, which masks it. Related: `row_number()
+    OVER ()` (L250, L293, L317) numbers with no `ORDER BY`, so id stability rests on
+    `SET threads TO 1` (L438) and nothing links the two decisions but a comment. Fix:
+    `(abs(seed) % 2000) / 1000.0 - 1`, plus one sentence in the docstring.
+  - **T10-7 — small, grouped:** `greatest(amount, 1.0)` (L242) is an unreachable floor —
+    **measured** at 60 customers, minimum amount $207.30 and zero rows at $1.00 (a lognormal(7.8,
+    0.7) would need roughly eleven sigma below the mean); `communications.channel` is not in
+    `PROMISED_VALUE_SETS` while `stage` is, so a new channel would not go red while a new stage
+    does; `max(i.days_overdue)` (L368) is the only aggregate in `v_customer_ar` without
+    `coalesce`, so a customer with no invoices would yield NULL — **measured:** 0 rows in that
+    state, a branch that never runs; `GROUP BY 1, 2, 3, 4, 5` (L371) is positional and breaks
+    silently if the `SELECT` list is reordered; the rule "paid means `payment_date` is not null and
+    `<= as_of`" is written twice, at L280 and L300, with nothing tying them together; the run summary is announced as
+    "self-verifying" (L445) but asserts nothing — an empty ledger would print zeros and exit 0;
+    and no CLI argument has range validation (`--customers 0` was not measured). There is no
+    `tests/test_generate.py`: in a clean checkout this file's entire coverage is the side effect of
+    the `ledger` fixture on sixteen tests that study something else. (`tests/test_ledger.py` and
+    `tests/test_mcp.py` do assert against generator output, but only through a pre-built
+    `data/ledger.duckdb`, which is git-ignored — so they skip in CI and in the 449-green baseline,
+    which is `R1-C8`'s finding, not a new one.)
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
