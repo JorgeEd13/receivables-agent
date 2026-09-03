@@ -1547,6 +1547,81 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     `tests/test_mcp.py` do assert against generator output, but only through a pre-built
     `data/ledger.duckdb`, which is git-ignored — so they skip in CI and in the 449-green baseline,
     which is `R1-C8`'s finding, not a new one.)
+- **Cleanup, queued 2026-09-03 (front-end, `R1-T11`):** eight findings over `web/src/*` and
+  `web/vite.config.js`, none fixed - the study programme documents, it does not repair. Baseline:
+  **449 green**, tree restored afterwards. **The territory has no automated oracle:** the repo
+  configures no JavaScript test runner, and exactly one pytest touches these 779 lines -
+  `tests/test_plan_cache.py::test_curated_questions_match_ui_suggestions`, which reads `App.jsx` as
+  text and runs a regex. Deleting `web/src/api.js` outright leaves 449 green. So the client-side
+  measurements below were taken with two throwaway Node harnesses (a fake `fetch` whose body is a
+  `ReadableStream`, and three faked browser globals for `theme.js`); neither harness was added to
+  the repo. **T11-1 is a live-demo falsehood** and is flagged accordingly; nothing here is an
+  externally reachable security hole.
+  - **T11-1 - the malformed-frame `catch` swallows the caller's own error** (`web/src/api.js`
+    L56-60). The `try` wraps `JSON.parse` **and** the `onEvent(...)` call, and `web/src/App.jsx`
+    L99-101 throws on purpose for `{type:"error"}` to abort the turn. **Measured** (Node harness,
+    fake `fetch`): feeding `data: {"type":"error","message":"provider down"}` then `data: [DONE]`,
+    `streamChat` **resolves normally** and the caller's throw never propagates; `answered` stays
+    false and the UI shows the generic `"The agent did not return an answer."`. The server
+    serialises `str(exc)` into the stream on purpose (`src/api/app.py` L130) and the client
+    discards it - so a visitor is told the agent returned nothing when the backend said exactly
+    what failed. Fix: `catch (e) { if (!(e instanceof SyntaxError)) throw e; }` - one line.
+  - **T11-2 - the SSE frame separator only recognises LF** (`web/src/api.js` L49). The spec ends
+    an event on a blank line terminated by LF, CRLF **or** CR. **Measured:** with `\r\n\r\n`
+    frames, `buffer.indexOf("\n\n")` never matches, `onEvent` is never called, and `streamChat`
+    **resolves successfully with zero events** - no error, no log. A control run with the exact
+    format `src/api/app.py` L119 emits today delivers all three events. Any intermediary that
+    normalises line endings turns the demo into a dead screen with no diagnostic.
+  - **T11-3 - `data:` without the optional space drops every frame silently** (`web/src/api.js`
+    L52-54). `startsWith("data: ")` and `slice(6)` hard-code the space, which the SSE spec makes
+    optional. **Measured:** with `data:{...}` frames, `find` matches nothing, the `continue`
+    discards the frame, and the stream ends with zero events and no error. Same wrong fail-safe
+    direction as T11-2. The two literals (`"data: "` and `6`) are the same fact written twice.
+  - **T11-4 - theme and language are persisted on mount, so the ambient signal dies after the
+    first load** (`web/src/theme.js` L22-29 with `web/src/App.jsx` L37-45). `applyTheme` both
+    stamps the attribute and writes `localStorage`, and it is called from `useEffect([theme])`,
+    which runs on mount, not only on click; `persistLocale` has the same call shape.
+    **Measured** (Node harness, faked `localStorage`/`matchMedia`): visit 1 under a dark OS with
+    zero clicks already stores `"dark"`; visit 2 under a light OS still returns `"dark"`. Under
+    StrictMode the write happens twice in dev. There is also no
+    `matchMedia(...).addEventListener("change", ...)`, so a live OS switch is never followed. Fix:
+    persist from the event handler, not from the effect.
+  - **T11-5 - the one guard over this territory is text-based and blind to single quotes**
+    (`tests/test_plan_cache.py` L410-411). It regexes `"([^"]+)"` out of the `SUGGESTIONS` block.
+    **Measured:** adding a non-curated suggestion in double quotes -> **1 failed** (the guard
+    works); the identical suggestion in single quotes -> **1 passed**, with a chip live in the UI
+    that misses the 0.90-similarity plan cache and falls through to the tiny model. Fix: parse the
+    array instead of scanning the text (a `node -e` in the test), or assert the block contains no
+    string literal the regex could not see.
+  - **T11-6 - the `SUGGESTIONS` comment names the wrong owner** (`web/src/App.jsx` L6-10). It says
+    the list must mirror `data/seed_plan_cache.py`. **Measured:** `"Top 5 customers by overdue
+    balance in each aging bucket"` is **not** in `SEED_QUESTIONS`; it is in `CURATED_PLANS`
+    (`data/curated_plans.py` L88), which is what the test actually validates against. Anyone
+    following the comment to keep the lists in lockstep edits the list that does not decide.
+    Related pairs in the same territory: `LOCALES` (`web/src/i18n.js` L10) versus the hand-written
+    ternary in the toggle (`web/src/App.jsx` L131), and the palette written out four times in
+    `web/src/styles.css` L5-68.
+  - **T11-7 - dead translations: the `query_ledger`/`search_policy` keys never match**
+    (`web/src/i18n.js` L33-34, L55-56). The server streams full narration text
+    (`src/agent/turn_control.py` L320-329, e.g. `"Querying the ledger for the figures..."`) and
+    `web/src/App.jsx` L176 calls `t(text)` on it, so the short keys are never looked up and the
+    translator falls through to returning the key itself. Consequence: with the UI in Portuguese
+    the step list renders **in English**, silently, because the fallback is designed never to
+    fail. Either translate server-side, send a machine key alongside the text, or delete the keys.
+  - **T11-8 - small, read-only findings, not measured:** `streamChat` returns on `[DONE]` without
+    `reader.cancel()`; no `AbortController`, no `fetch` signal and no
+    `setTimeout` under `web/src/`, so a stream that never yields `answer` leaves the UI busy until
+    the connection dies (the one timer that does exist, the elapsed-seconds `setInterval` at
+    `web/src/App.jsx` L61, neither bounds nor cancels the stream); `.app { height: 100vh }`
+    (`web/src/styles.css` L84) is the value iOS Safari computes with the address bar included
+    (`100dvh` is the fix) - read, never checked on a device; `.composer input:focus` removes the
+    `outline` and replaces it with colour only (L320-323), and no button has a `:focus-visible`
+    rule; `sendChat` (`web/src/api.js` L8-22) is exported and imported by nobody; the streaming
+    event list in the `api.js` header comment (L25-26) and in the `chat_stream` docstring
+    (`src/api/app.py` L111-112) both omit the `step` event the UI depends on; `.quick-chip:disabled`
+    and `.composer button:disabled` use different cursors for the same state; and `styles.css` has
+    no `@media` breakpoint at all in 338 lines - the layout survives on a phone because it is a
+    single flex column, not by design.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
