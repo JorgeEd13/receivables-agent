@@ -1622,6 +1622,68 @@ as the real wait guard. NOT "blindly raise the cap" (that re-creates the silent 
     and `.composer button:disabled` use different cursors for the same state; and `styles.css` has
     no `@media` breakpoint at all in 338 lines - the layout survives on a phone because it is a
     single flex column, not by design.
+- **Blind audit backlog (queued 2026-09-03, `R1-V2` — two blind instances, code and tests,
+  each on its own copy of the tree; 24 mutations, 11 green; real tree untouched at 449 passed):**
+  - **V2-1 🔴 URGENT — concurrent requests read each other's rows** (`src/agent/graph.py`
+    L136 + `src/api/app.py` L53 + `src/agent/ledger.py` L47-53). The agent is built once in
+    `lifespan` and shared; it holds **one** DuckDB connection; `run_query` does
+    `cur = con.execute(sql)` and DuckDB's `execute()` **returns the connection itself**, so the
+    result set lives on the shared object. Two overlapping turns interleave `execute`/`fetchall`
+    and one gets the other's rows — no exception, well-formed JSON. **Measured** through the async
+    path LangGraph's ToolNode uses under `/api/chat`: 389/480 concurrent calls wrong (blind
+    instance) and **275/320 wrong** on an independent re-run. Same on the MCP core
+    (`run_guarded_query`, 4 threads x 300): 980/1200 wrong; on stdio it is masked only because
+    the installed `mcp` SDK calls sync tools inline — a third-party implementation detail, not a
+    guarantee of this repo. Two comments assert the opposite: `graph.py` L141 (*"the process-wide
+    shared agent is safe"*) and `turn_control.py` L32-34 (*"never cross-contaminate"*), the latter
+    naming the exact failure mode that happens. The test named as owner,
+    `test_interleaved_turns_do_not_cross_contaminate`, uses a pure-Python fake tool called
+    synchronously — no connection, no thread hop. **Fix:** a `con.cursor()` (or a connection) per
+    turn, or a lock around `run_query`; then narrow both comments to "turn *state*".
+  - **V2-2 — the tracker wiring has no owner** (`src/agent/graph.py` L144-145). Dropping
+    `wrap=tracker.wrap` from **either** tool leaves **449 green**. `ToolCallTracker` is heavily
+    tested, but nothing asserts it is attached to the real agent's tools — the unit tests build
+    their own tracker. Without the wiring, dedup and the ADR-014 graceful finalization silently
+    vanish. Same layer split as V2-7: component tested, assembly not.
+  - **V2-3 — the hardened connection is unpinned, and its only test is skipped in CI**
+    (`src/agent/ledger.py` L28-44, `tests/test_ledger.py` L20-23). Dropping
+    `config=dict(HARDENED_CONFIG)` entirely, or just `enable_external_access`, or flipping
+    `lock_configuration` to false: **449 green** in each case, while `read_only=True -> False`
+    correctly goes red. No test in scope references `HARDENED_CONFIG` or any key of it, and
+    `test_ledger.py` is `skipif`'d on the git-ignored `data/ledger.duckdb`, so in CI it does not
+    run at all. Today it is defense-in-depth (11 exfiltration payloads still rejected by the
+    prompt-layer allowlist), which is precisely why it must survive a refactor nobody watches.
+    **Both blind instances found this independently**, and it was already queued as **T7-1** on
+    2026-08-12 — the re-find is a measure of the backlog not moving, not of new information.
+  - **V2-4 — `tools_used` de-duplication is unpinned and forked**
+    (`src/agent/message_utils.py` L37). Replacing `if name and name not in names:` with
+    `if name:` stays **449 green**: every assertion on `tools_used` uses one call per tool, so the
+    dedup branch is never reached with a repeat. A ReAct loop that calls `query_ledger` three
+    times would render it three times in `ChatResponse.tools_used` and in the SSE `answer` event.
+    Aggravated by the second copy in `evals/run.py` L35 (see the 2026-07-31 cleanup item above):
+    the two can diverge green. **Found independently by both blind instances.**
+  - **V2-5 — `test_contains_number_tolerance` does not pin the tolerance**
+    (`tests/test_evals.py` L32-38, `evals/checks.py` L46). `<= tol` -> `<= tol + 1` stays
+    **449 green**, because the negative payload (90 vs 77.7) sits 12.3 away from a 1.0 boundary:
+    any tolerance under ~12 keeps it False. The test proves the comparison exists, never that
+    `tol` matters — in the suite whose job is to catch a wrong number. **Fix:** add a boundary
+    pair (78.8 vs 78.7 at `tol=1.0`).
+  - **V2-6 — nothing watches the tests.** Two mutations **inside test files** stayed green:
+    `tests/test_mcp.py` L57 `is True` -> `is not None` (now satisfied by `False`), and deleting
+    the negative case at `tests/test_evals.py` L35 outright. The production off-by-one behind the
+    first (`mcp_server/server.py` L75 `>=` -> `>`) **is** caught while the assertion is intact —
+    the guard works and its only witness is one token wide. There is no mutation gate, no coverage
+    floor and no assertion-count check anywhere in `pyproject.toml`.
+  - **V2-7 — named, unowned behaviour (reading only, not measured).** No test references
+    `graph.build_agent` — the composition root used by `src/api/app.py` and `evals/run.py`
+    (`tests/test_api.py` substitutes a fake agent, so the API suite cannot see it). Nor
+    `_detect_ram`, `_detect_cpu`, `_detect_nvidia_gpu`, `detect_hardware`, `requirement_for`,
+    `summary`, `_main`: all real hardware detection is untested, every profile is hand-built, and
+    the recommendation logic is checked against a fixture that can never disagree with the
+    detector. `evals/run.py` has no test file importing it.
+  - Also re-found independently: **T9-1 / T9-2** (`test_name_matching_is_tag_tolerant` feeds a
+    byte-identical name on both sides, so reducing `_normalize` to `name.lower()` stays 449
+    green). Already queued 2026-08-12; unchanged, re-confirmed.
 - After that: optional polish only. The MVP (Phases 0–5) is functionally done.
 
 ## Open decisions / notes
