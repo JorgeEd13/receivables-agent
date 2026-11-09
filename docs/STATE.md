@@ -217,6 +217,33 @@ tests instead of the code, **4 of 6** mutations stay green.
 > rows *returned*, not rows *computed*. Confidentiality held under every vector tried.
 > Needs a design call (watchdog interrupt / row budget / killable subprocess) — see ADR-022.
 
+> ✅ **RESOLVED 2026-11-09 — the Space is synced to `main` (`6271848`), deployed as `space/main` =
+> `7e1c861`.** The block below is history. Method: a content sync, not a cherry-pick. A worktree of
+> `space-deploy` was checked out with `GIT_LFS_SKIP_SMUDGE=1` (that is the fix for the `assets/logo.png`
+> smudge error). Tree = `main`, plus the space-only files (front-matter README, literal
+> `Dockerfile` = `Dockerfile.hf`, LFS `.gitattributes`, and the existing LFS pointers for the logo and
+> GIF, whose binaries are unchanged since June, so nothing new went up to LFS). Verified before the
+> push: a local build + run of that exact tree, with 3 ADR-022 bypass payloads refused inside the
+> image and the headline questions answering. Verified after the push: HF runtime `RUNNING 7e1c861`,
+> `/api/health` `agent_ready:true`, UI 200, DSO chip `77.70`, and the policy-only chip now says "the
+> policy text was re-read" instead of claiming a SQL re-run (the R1 fix is live).
+>
+> **Found while rebuilding, and fixed in `6271848`:** `duckdb>=1.1` resolved to **2.0.0** in the
+> image, and the parser-based guard then **refuses ordinary queries** (`SELECT COUNT(*) FROM invoices`
+> → "could not be normalized"). That is fail-closed, but it broke every novel question. The suite has
+> 94 failures on 2.0.0, 449 passes on 1.5.3 and 1.5.6. Capped `duckdb<2` in all three dependency
+> files. `requirements-hf.txt` was also missing the `langgraph<2` cap, now added. Supporting
+> DuckDB 2 is a separate decision.
+>
+> **Still open:** (1) CI has been red since 2026-09-02 on **py3.11 only** —
+> `test_r6_a_deeply_nested_query_is_refused_rather_than_crashing` raises `RecursionError` instead of
+> `GuardrailError`. The Space image is `python:3.11-slim`, so the same crash-instead-of-refusal can
+> happen there (nothing executes either way). (2) Tiny-model accuracy on novel questions: asked "how
+> many invoices were issued in total?", the local image answered **202,844,045**, while the ledger
+> holds **1,057,402**. That is the known tiny-tier limit (ADR-011), not a deploy defect, but a visitor
+> can see it. (3) Local Docker on this machine needs `--sysctl net.ipv6.conf.all.disable_ipv6=1` or
+> the model pull fails (IPv6 unreachable). HF is unaffected.
+
 > ⚠️ **OPEN — the live demo still runs the vulnerable guard.** Re-measured 2026-07-30 after the
 > pinning fix: `git rev-list --count space/main..origin/main` = **54**, this commit included
 > — re-measured **2026-07-31 after `R1-C9`: 66** (50 → 52 → 54 → 56 → 58 → 61 → 63 → 66; every
