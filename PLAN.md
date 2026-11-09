@@ -375,6 +375,50 @@ PT-BR via the toggle; the honesty boundary (UI-localized ≠ answer-translated) 
 no regression to the streaming/plan-cache paths. ADR-015 if a non-obvious choice is made (e.g., the i18n
 approach). Coordinate the visual language with `forge-pdm-mlops` F9.
 
+### Phase 10 — Multilingual: ask in any language, get the answer in that language  ⏳ (planned 2026-11-09)
+
+**Why now.** stillroom measured this capability and shipped it (its ADR-091 and the F4.4
+embedder swap). It ports cleanly here: the ledger has no language at all, so
+only two layers are English-bound: the **embedder** (MiniLM, English-trained, used by BOTH the
+policy RAG and the plan-cache lookup) and the **answer wording**. Today a Portuguese
+"Qual é o nosso DSO?" probably misses the cached plan and falls through to the ~80 s tiny-model
+path. That has not been measured yet, so measuring it is step 0.
+
+**Lessons carried from stillroom (these set the order of the work):**
+- **Measure before claiming, on the input that CAN fail.** stillroom's "name the language" fix
+  was verified only on questions asked *in* the configured language. Asked in another language it
+  held 3/30 (1.5b) and 7/30 (7b). The matching rule held 28/30 (1.5b) and 21/30 (7b), and the
+  bigger model drifted to Chinese on Korean and Arabic.
+- **A similarity floor is not a gate until it is measured on a realistic corpus.** stillroom found
+  its 0.25 floor never refused anything under either embedder. Here the failure is worse than a
+  missed refusal: a false plan-cache hit replays a *neighbour's* plan, which means **wrong
+  numbers** (`R1-C13` family).
+- **Fixed sentences don't translate themselves.** The replay banner ("Answered from a cached
+  plan…"), refusals and guard messages are constants. Each one needs a reviewed sentence per
+  language. A language without one falls back to English **visibly**, never silently (ADR-091's
+  boundary).
+
+**Steps**
+- **10.0 Benchmark first.** `evals/answer_language.py`: the headline chips plus novel questions in
+  about 10 languages (EN, PT, ES, FR, DE, IT, ZH, JA, KO, AR), on tiny and strong models. Record
+  three numbers per language: cache hit or miss, correct number (± tolerance), reply language.
+  Baseline = today's MiniLM.
+- **10.1 Multilingual embedder for BOTH indexes.** Candidates: `bge-m3` (567M, MIT, the one
+  stillroom ships; the Space already runs Ollama, so it can serve the embeddings) vs
+  `paraphrase-multilingual-MiniLM-L12-v2` (about 118M, ONNX, lighter on the free CPU tier).
+  Decide by measurement: cross-lingual hit rate, **zero false hits on a negative set**, image
+  size and cold start. Recalibrate the plan-cache threshold on that negative set. Name models by
+  version, licence included.
+- **10.2 Answer follows the question ("match" mode)** in the system prompt and the replay
+  assembler. Translate the fixed sentences for EN + PT-BR first (the UI already ships both,
+  ADR-015). Other languages get the English banner and say so.
+- **10.3 UI.** Portuguese chips seeded as plan-cache keys. The README states the measured
+  per-language table, not "multilingual".
+
+**Done when:** the 10.0 benchmark is re-run after 10.1–10.3 and its table is in the README, the
+false-hit count on the negative set is 0, the Space is redeployed (`space-deploy`), and an ADR
+records the embedder choice.
+
 ## MVP cut
 
 Phases 0–4 plus a lightweight Phase 5. The MCP server, the skill and the

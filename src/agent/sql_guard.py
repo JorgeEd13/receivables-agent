@@ -223,8 +223,11 @@ MAX_ROWS_CEILING = 10_000
 # 250 frames against a measured worst case of **18** across every payload the
 # two guard suites accept, plus a five-CTE aging report with window functions
 # and a CASE ladder written to be worse than anything in them (also 18 — tree
-# depth follows nesting, not size). Thirteen times the deepest real query, and
-# still ~750 frames below the interpreter's default limit of 1000.
+# depth follows nesting, not size). Thirteen times the deepest real query.
+# Correction 2026-11-09: "~750 frames below the default limit" was wrong for
+# 3.11, where a depth-250 tree costs about 500 frames (the JSON decoder recurses
+# too). Since then the limit is enforced on the text before decoding, and a
+# stack that still runs out is refused (`_STACK_EXHAUSTED`), never raised.
 MAX_WALK_DEPTH = 250
 
 # Parsing needs a connection, but never a *data* connection: this one is
@@ -269,6 +272,37 @@ def _single_statement(sql: str) -> None:
         )
 
 
+def _json_depth_exceeds(text: str, limit: int) -> bool:
+    """True when the JSON in `text` nests arrays/objects more than `limit` deep.
+
+    Iterative on purpose: the whole point is to decide BEFORE anything recursive
+    touches the document. Brackets inside JSON strings do not count, and escape
+    sequences are skipped so that an escaped quote does not end the string. One
+    level here is one frame of `_collect` (it descends once per dict and once per
+    list), so the same limit means the same thing in both places.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif ch in "]}":
+            depth -= 1
+    return False
+
+
 def _syntax_tree(sql: str) -> dict[str, Any]:
     """Parse `sql` to a syntax tree, or reject it.
 
@@ -284,6 +318,16 @@ def _syntax_tree(sql: str) -> dict[str, Any]:
             raise GuardrailError(f"Query does not parse: {exc}") from exc
     if not raw or not raw[0]:
         raise GuardrailError("Query could not be parsed.")
+    # Depth is checked on the TEXT, before `json.loads`, because the decoder is
+    # itself recursive. On Python 3.11 it raised `RecursionError` for the
+    # 600-term `SELECT 1+1+…` before `_collect` could refuse it (CI red on 3.11
+    # only, from 2026-09-02 to 2026-11-09). 3.12 did not crash, which is why
+    # nobody noticed locally. Refusing here also bounds every recursive helper
+    # that runs on the tree afterwards (`_without_locations` in
+    # `statement_identity` had no limit of its own), and the result no longer
+    # depends on how deep the caller's stack already is.
+    if _json_depth_exceeds(raw[0], MAX_WALK_DEPTH):
+        raise GuardrailError(f"Query is nested too deeply (walk limit {MAX_WALK_DEPTH}).")
     tree = json.loads(raw[0])
     if tree.get("error"):
         raise GuardrailError(
@@ -307,7 +351,16 @@ def _statement_text(sql: str) -> str:
     a query that *executed* fell back to the text key, restoring the literal
     collision the tree key exists to prevent.
     """
-    return sql.strip()
+    text = sql.strip()
+    # A lone surrogate (`'\\ud800'`) is a valid Python `str` that is not valid
+    # Unicode text. DuckDB's binding refuses it with TypeError / RuntimeError,
+    # neither of which any caller catches (found 2026-11-09 by a blind
+    # adversarial pass). Decided here, once, for every entry point.
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise GuardrailError("Query is not valid Unicode text.") from exc
+    return text
 
 
 def _statement_and_tree(sql: str) -> tuple[str, dict[str, Any]]:
@@ -362,9 +415,12 @@ def statement_identity(sql: str) -> str | None:
     """
     try:
         tree = _syntax_tree(_statement_text(sql))
+        return json.dumps(_without_locations(tree), sort_keys=True, default=str)
     except GuardrailError:
         return None
-    return json.dumps(_without_locations(tree), sort_keys=True, default=str)
+    except RecursionError:
+        # See `_STACK_EXHAUSTED`: no opinion is the safe answer for a dedup key.
+        return None
 
 
 def _without_locations(node: Any) -> Any:
@@ -1001,7 +1057,28 @@ def invented_outputs(sql: str) -> tuple[str, ...]:
     return tuple(invented)
 
 
+_STACK_EXHAUSTED = (
+    "Query could not be checked: the caller's stack is nearly exhausted."
+)
+# The text pre-check (`_json_depth_exceeds`) refuses any tree deeper than
+# MAX_WALK_DEPTH whatever the stack, with the "nested too deeply" message. Below
+# that limit the walk and the JSON decoder still recurse, so a caller with
+# almost no stack left (measured: 150 free frames, about 35 to 70 `+` terms
+# depending on the Python version) can still exhaust it. That case is refused
+# here rather than crashing. It fails closed: a real request has hundreds of
+# free frames, and the deepest query either guard suite accepts is depth 18.
 def guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
+    """Validate `sql` and return an executable, row-capped query (see `_guard_query`).
+
+    Raises `GuardrailError` and nothing else.
+    """
+    try:
+        return _guard_query(sql, max_rows=max_rows)
+    except RecursionError as exc:
+        raise GuardrailError(_STACK_EXHAUSTED) from exc
+
+
+def _guard_query(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
     """Validate `sql` and return an executable, row-capped query.
 
     Returns the statement — as DuckDB prints it back from the validated syntax

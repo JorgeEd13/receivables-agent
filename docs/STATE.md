@@ -217,6 +217,29 @@ tests instead of the code, **4 of 6** mutations stay green.
 > rows *returned*, not rows *computed*. Confidentiality held under every vector tried.
 > Needs a design call (watchdog interrupt / row budget / killable subprocess) — see ADR-022.
 
+> ✅ **2026-11-09 (later) — CI green again on 3.11, and the guard can no longer crash.** CI
+> had been red on Python 3.11 since 2026-09-02. `json.loads` is recursive, and on 3.11 it raised
+> `RecursionError` on the 600-term `SELECT 1+1+…` before `_collect` could refuse it. 3.12 happened
+> not to crash. Fix in `sql_guard.py`:
+> (1) the depth limit is now checked on the serialized TEXT, iteratively, before anything recursive
+> runs (`_json_depth_exceeds`, the same 250 as `MAX_WALK_DEPTH`);
+> (2) `guard_query` and `statement_identity` turn any remaining `RecursionError` into a refusal or
+> `None` (`_STACK_EXHAUSTED`). That fails closed, and only happens with an almost-exhausted stack;
+> (3) a lone surrogate (`'\ud800'`) used to raise TypeError / RuntimeError. It is now refused
+> once, in `_statement_text`.
+> Two blind `adversario` rounds. Round 1 found (2) and (3). Round 2 found no crash across 402
+> inputs × stack headroom 150–399 on 3.11 and 3.14, and 8 surviving mutations. 4 are now closed
+> by tests (fail-open catch, `''` identity, counter +100, escape handling). Still green, and
+> accepted: `MAX_WALK_DEPTH` raised (now it can only over-refuse), the `_collect` depth check
+> deleted (the text check covers it), and 3 test-text mutations. **460 tests (3.14), 452 + 4
+> skipped (3.11).**
+>
+> **Still open, both over-refusals that existed before this change (fail closed, no policy
+> reason):** `SELECT (((…1…)))` with about 9,995 parentheses is refused by DuckDB's own parser
+> ("memory exhausted"), even though the tree is only 8 deep. `SELECT 1e999` (and `-1e999`,
+> `1e400::DOUBLE`) is refused at the round-trip step ("property 'value' expected"), while
+> `statement_identity` accepts it.
+
 > ✅ **RESOLVED 2026-11-09 — the Space is synced to `main` (`6271848`), deployed as `space/main` =
 > `7e1c861`.** The block below is history. Method: a content sync, not a cherry-pick. A worktree of
 > `space-deploy` was checked out with `GIT_LFS_SKIP_SMUDGE=1` (that is the fix for the `assets/logo.png`

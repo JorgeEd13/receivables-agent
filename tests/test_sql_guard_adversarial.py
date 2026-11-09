@@ -40,6 +40,8 @@ nothing ever reads it. R4 is that finding.
 
 from __future__ import annotations
 
+import contextlib
+
 import duckdb
 import pytest
 
@@ -53,6 +55,7 @@ from src.agent.sql_guard import (
     MAX_WALK_DEPTH,
     GuardrailError,
     guard_query,
+    statement_identity,
 )
 
 # A row value that exists in the throwaway ledger but in a relation that is NOT
@@ -1853,6 +1856,147 @@ def test_r6_a_deeply_nested_query_is_refused_rather_than_crashing() -> None:
     with pytest.raises(GuardrailError) as exc:
         guard_query("SELECT 1" + "+1" * 600)
     assert "nested too deeply" in str(exc.value), str(exc.value)
+
+
+def _with_stack_headroom(headroom: int, fn):
+    """Run `fn` with only `headroom` frames left before `RecursionError`."""
+    import sys
+
+    old = sys.getrecursionlimit()
+    depth = len(__import__("inspect").stack())
+    sys.setrecursionlimit(depth + headroom)
+    try:
+        return fn()
+    finally:
+        sys.setrecursionlimit(old)
+
+
+DEEP = "SELECT 1" + "+1" * 600
+
+
+def test_r6_deep_query_is_refused_with_little_stack_left() -> None:
+    """2026-11-09: CI was red on Python 3.11 only, because `json.loads` (itself
+    recursive) crashed on this tree before `_collect` could refuse it, and 3.12's
+    decoder happened not to. A test that passes or fails by interpreter version
+    pins nothing, so this one leaves 150 frames, fewer than `_collect`'s own
+    limit of 250. Only a check that runs before anything recursive can pass it,
+    on every version. Measured with that check disabled on 3.14: red.
+    """
+    with pytest.raises(GuardrailError, match="nested too deeply"):
+        _with_stack_headroom(150, lambda: guard_query(DEEP))
+
+
+def test_r6_statement_identity_does_not_crash_on_a_deep_query() -> None:
+    """`statement_identity` walked the tree with `_without_locations`, which had
+    no depth limit. Measured before the fix on 3.14: `RecursionError` with 150
+    frames left. A dedup caller catches nothing, so that was a crash in the agent
+    loop. A query too deep to run has no identity: `None`, the same as one that
+    does not parse.
+    """
+    assert _with_stack_headroom(150, lambda: statement_identity(DEEP)) is None
+
+
+def _reference_depth(node: object) -> int:
+    """JSON nesting depth, computed independently of the guard's own counter."""
+    if isinstance(node, dict):
+        return 1 + max((_reference_depth(v) for v in node.values()), default=0)
+    if isinstance(node, list):
+        return 1 + max((_reference_depth(v) for v in node), default=0)
+    return 0
+
+
+def _plus_query_with_tree_depth_above(limit: int) -> str:
+    """The shortest `SELECT 1+1+…` whose serialized tree is deeper than `limit`.
+
+    Measured with `_reference_depth`, not with `sql_guard._json_depth_exceeds`:
+    a helper that used the counter under test moved with it, and a mutation that
+    relaxed the counter by 100 levels stayed green (2026-11-09, round 2).
+    """
+    import json
+
+    con = duckdb.connect(":memory:")
+    for n in range(1, 400):
+        sql = "SELECT 1" + "+1" * n
+        raw = con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()[0]
+        if _reference_depth(json.loads(raw)) > limit:
+            return sql
+    raise AssertionError("no query deep enough")
+
+
+def test_depth_counter_ignores_brackets_inside_escaped_strings() -> None:
+    """Brackets after an escaped quote are still inside the string. A counter
+    that forgets escapes ends the string at `\\"` and counts them as nesting."""
+    text = '{"k": "\\" [[[[ ]]]] "}'
+    assert not sql_guard._json_depth_exceeds(text, 1)
+    assert sql_guard._json_depth_exceeds('{"k": [[1]]}', 2)
+
+
+def test_stack_exhaustion_inside_the_guard_is_a_refusal(monkeypatch) -> None:
+    """Fail closed, asserted directly. Round 2 replaced the catch with
+    `return sql` (fail OPEN) and nothing went red, because the low-stack tests
+    accept either outcome. Forcing the RecursionError pins the branch itself."""
+
+    def exhausted(*_args, **_kwargs):
+        raise RecursionError("simulated")
+
+    monkeypatch.setattr(sql_guard, "_collect", exhausted)
+    with pytest.raises(GuardrailError, match="nearly exhausted"):
+        guard_query("SELECT COUNT(*) FROM invoices")
+
+    monkeypatch.setattr(sql_guard, "_without_locations", exhausted)
+    assert statement_identity("SELECT COUNT(*) FROM invoices") is None
+
+
+def test_r6_just_over_the_limit_is_refused_by_the_text_check() -> None:
+    """Round 2 of the 2026-11-09 attack: three mutations stayed green, because the
+    only low-stack test used a 600-term query, far past every limit. A pre-check
+    that drifts from MAX_WALK_DEPTH (measured: 4x) now turns this red: a tree ONE
+    level over the limit has to be refused by the text check ("nested too
+    deeply"). The walk would need more frames than are left, so the only other
+    outcome is the stack-exhausted refusal.
+
+    Measured and NOT caught: raising MAX_WALK_DEPTH itself to 500. This test
+    reads the constant, so it moves with it. Accepted, because since the
+    boundary catch in `guard_query` a bigger limit can no longer crash. The
+    worst it can do is refuse a legitimate query when the caller's stack is
+    deep, which fails closed.
+    """
+    sql = _plus_query_with_tree_depth_above(MAX_WALK_DEPTH)
+    with pytest.raises(GuardrailError, match="nested too deeply"):
+        _with_stack_headroom(150, lambda: guard_query(sql))
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT " + "+".join(["1"] * 75),
+        "SELECT * FROM " + "(SELECT * FROM " * 60 + "customers" + ")" * 60,
+    ],
+    ids=["75-terms", "60-nested-subqueries"],
+)
+def test_r6_below_the_limit_with_little_stack_never_crashes(sql: str) -> None:
+    """The band the text check lets through (tree depth under MAX_WALK_DEPTH) still
+    recurses. Measured 2026-11-09 with 150 free frames: RecursionError from 34
+    terms on 3.11 and 71 on 3.14. It may be accepted or refused, never raised.
+    """
+    with contextlib.suppress(GuardrailError):
+        _with_stack_headroom(150, lambda: guard_query(sql))
+    result = _with_stack_headroom(150, lambda: statement_identity(sql))
+    assert result is None or isinstance(result, str)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["SELECT '\ud800'", "SELECT 1 -- \udcff", 'SELECT 1 AS "\udcff"', "\ud83d"],
+    ids=["literal", "comment", "identifier", "alone"],
+)
+def test_lone_surrogates_are_refused_not_raised(sql: str) -> None:
+    """A lone surrogate is a valid `str` and invalid Unicode. Before 2026-11-09 it
+    raised TypeError out of guard_query and RuntimeError out of statement_identity.
+    """
+    with pytest.raises(GuardrailError, match="not valid Unicode"):
+        guard_query(sql)
+    assert statement_identity(sql) is None
 
 
 def test_r6_ordinary_nesting_is_not_refused(con) -> None:
