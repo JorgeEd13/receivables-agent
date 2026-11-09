@@ -8,8 +8,10 @@
 #   * langchain-google-genai is intentionally OMITTED — Gemini is not the Space's
 #                         path, and dropping it keeps the image lean.
 # Mirrors pyproject's runtime deps + the `ollama` and `data` extras.
-duckdb>=1.1
-langgraph>=1.0
+# Capped: DuckDB 2.0 breaks the parser-based SQL guard (ADR-022).
+duckdb>=1.1,<2
+# Capped: create_react_agent is deprecated, removal announced for v2.0 (ADR-004).
+langgraph>=1.0,<2
 langchain-core>=0.3
 pydantic>=2
 pydantic-settings>=2

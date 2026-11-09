@@ -14,7 +14,10 @@ authors = [{ name = "Jorge Ribeiro" }]
 # Phase 4: fastapi, uvicorn (HTTP service wrapping the agent)  ✅
 # Phase 5: mcp (AI-native layer; optional extra below)  ✅
 dependencies = [
-    "duckdb>=1.1",
+    # Upper bound is deliberate: the SQL guard (ADR-022) parses with DuckDB's own
+    # parser and round-trips the tree; DuckDB 2.0 changed that output and the guard
+    # refuses ordinary queries (94 tests red on 2.0.0). v2 must be a decision.
+    "duckdb>=1.1,<2",
     # Upper bound is deliberate: `langgraph.prebuilt.create_react_agent` is
     # deprecated since v1.0 with removal announced for v2.0, and the agent is
     # built on it (ADR-004). v2 must be a decision, not a resolver surprise.

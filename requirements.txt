@@ -2,7 +2,8 @@
 # runtime deps + the cloud provider used by the demo + the data generator that
 # builds the synthetic ledger at image-build time). Local dev should instead use
 #   pip install -e ".[ollama,gemini,data,dev]"
-duckdb>=1.1
+# Capped: DuckDB 2.0 breaks the parser-based SQL guard (ADR-022).
+duckdb>=1.1,<2
 # Capped: create_react_agent is deprecated, removal announced for v2.0 (ADR-004).
 langgraph>=1.0,<2
 langchain-core>=0.3
